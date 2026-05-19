@@ -24,6 +24,114 @@ class WishlistStatus(str, Enum):
     REMOVED = "removed"
 
 
+class DoubanMatchStatus(str, Enum):
+    AUTO_MATCHED = "auto_matched"
+    NEEDS_REVIEW = "needs_review"
+    CONFIRMED = "confirmed"
+    REJECTED = "rejected"
+    NO_MATCH = "no_match"
+
+
+@dataclass(frozen=True)
+class ViewingHistoryRaw:
+    source_file: str
+    source_row_number: int
+    source_row_hash: str
+    date_raw: str | None
+    name_raw: str | None
+    director_raw: str | None
+    year_raw: str | None
+    rating_raw: str | None
+    quality_raw: str | None
+    comment_raw: str | None
+    douban_subject_id_raw: str | None = None
+    douban_image_id_raw: str | None = None
+    id: str = field(default_factory=lambda: str(uuid4()))
+    imported_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+@dataclass(frozen=True)
+class ViewingHistoryCandidate:
+    source_raw_id: str
+    source_file: str
+    source_row_number: int
+    title: str
+    user_rating: float
+    source_row_hash: str | None = None
+    watched_date: date | None = None
+    director: str | None = None
+    release_year: int | None = None
+    quality: str | None = None
+    comment: str | None = None
+    douban_subject_id: str | None = None
+    douban_image_id: str | None = None
+
+
+@dataclass(frozen=True)
+class DoubanMatchInput:
+    source_raw_id: str
+    source_file: str
+    source_row_number: int
+    title: str
+    strategy: str
+    douban_subject_id: str | None = None
+    release_year: int | None = None
+    director: str | None = None
+
+
+@dataclass(frozen=True)
+class DoubanMatchCandidate:
+    source_raw_id: str
+    source_file: str
+    source_row_number: int
+    query_title: str
+    status: DoubanMatchStatus
+    match_score: float
+    match_reasons: tuple[str, ...]
+    candidate_subject_id: str | None = None
+    candidate_title: str | None = None
+    candidate_year: int | None = None
+    candidate_director: str | None = None
+
+
+@dataclass(frozen=True)
+class DoubanSearchResult:
+    subject_id: str
+    title: str
+    year: int | None = None
+    director: str | None = None
+    url: str | None = None
+
+
+@dataclass(frozen=True)
+class ConfirmedViewingHistoryInput:
+    source_raw_id: str
+    source_file: str
+    source_row_number: int
+    douban_subject_id: str
+    watched_date: date | None
+    user_rating: float
+    source_row_hash: str | None = None
+    quality: str | None = None
+    comment: str | None = None
+
+
+@dataclass(frozen=True)
+class DoubanMovieDetail:
+    subject_id: str
+    title: str
+    year: int | None = None
+    directors: tuple[str, ...] = ()
+    actors: tuple[str, ...] = ()
+    genres: tuple[str, ...] = ()
+    countries: tuple[str, ...] = ()
+    douban_rating: float | None = None
+    douban_vote_count: int | None = None
+    summary: str | None = None
+    poster_url: str | None = None
+    url: str | None = None
+
+
 @dataclass(frozen=True)
 class Movie:
     id: str

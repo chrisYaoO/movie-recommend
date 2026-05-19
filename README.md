@@ -16,9 +16,16 @@ This repository currently contains the first backend vertical slice:
 - feedback handling for `want_to_watch`, `maybe_later`, `not_interested`, and `opened_douban`
 - wishlist creation from `want_to_watch`
 - recording a wishlist movie as watched
+- raw viewing-history import from the confirmed Excel column shape
+- `.xlsx` reading through `openpyxl`
+- stable raw-row hashes so repeated imports can skip duplicates
+- Douban match input generation, confidence scoring, and manual subject-id confirmation
+- Douban subject detail parsing and Selenium-backed enrichment job support
+- SQLite persistence for canonical `movies` and final `viewing_history`
+- PostgreSQL repository support for the same `movies` and `viewing_history` contract
 - focused unit tests for the core recommendation loop
 
-This is intentionally not connected to PostgreSQL or Douban yet. The current slice fixes the behavior contract before persistence and ingestion are added.
+This slice still keeps live recommendation independent from Douban. External access belongs in import and enrichment jobs only.
 
 ## Project Layout
 
@@ -57,10 +64,67 @@ pip install -r requirements-dev.txt
 Expected result:
 
 ```text
-Ran 3 tests
+Ran 52 tests
 
-OK
+OK (skipped=2)
 ```
+
+The skipped tests are optional PostgreSQL integration tests. To run them, install PostgreSQL, create a test database, and set:
+
+```powershell
+$env:MOVIES_POSTGRES_DSN="postgresql://user:password@localhost:5432/movies_test"
+.\.venv\Scripts\python.exe -m unittest backend.tests.test_postgres_repository
+```
+
+## Import Auto-Matched History
+
+The current import job only persists automatically matched records. `needs_review` and `no_match` rows are counted and skipped; the manual review flow is intentionally left for a later slice.
+
+The CLI reads PostgreSQL connection settings from `--dsn`, `MOVIES_POSTGRES_DSN`, or local `.env`, in that order. A local `.env` should contain:
+
+```text
+MOVIES_POSTGRES_DSN=postgresql://user:password@localhost:5432/movies
+```
+
+```powershell
+.\.venv\Scripts\python.exe -m jobs.import_auto_matched_history data\imports\MOVIES.xlsx
+```
+
+For the first safe import from the current workbook, use only rows that already carry a Douban subject id:
+
+```powershell
+.\.venv\Scripts\python.exe -m jobs.import_auto_matched_history data\imports\MOVIES.xlsx --subject-id-only --detail-adapter selenium --chrome-binary-path "C:\Program Files\Google\Chrome\Application\chrome.exe"
+```
+
+To process the remaining metadata-search rows safely, use the resumable mode. It searches one row at a time, persists each `AUTO_MATCHED` result immediately, writes progress to `data/cache/import-auto-match-progress.json`, and exits on the first error so the next run can resume from that node.
+
+```powershell
+.\.venv\Scripts\python.exe -m jobs.import_auto_matched_history data\imports\MOVIES.xlsx --metadata-search-resume --detail-adapter selenium --chrome-binary-path "C:\Program Files\Google\Chrome\Application\chrome.exe"
+```（
+
+To manually review `needs_review` rows from the progress file, run:
+
+```powershell
+.\.venv\Scripts\python.exe -m jobs.review_matched_history data\imports\MOVIES.xlsx --detail-adapter selenium --chrome-binary-path "C:\Program Files\Google\Chrome\Application\chrome.exe"
+```
+
+For each row, press `Enter` to queue it for confirmation, enter `1` to reject it, or enter `q` to stop and resume later. The prompt only shows data already in the progress JSON so review stays fast; when the review loop exits, queued confirmations fetch Douban detail pages and persist the detail-page title as the canonical movie title.
+
+## Build Candidate Pool
+
+Queue Douban Top250 subject IDs with `source_type=douban_top250` and `source_ref=top{rank}`:
+
+```powershell
+.\.venv\Scripts\python.exe -m jobs.candidate_pool discover-top250
+```
+
+Process queued subjects, enrich missing movie details, add movies to `candidate_pool`, and enqueue one layer of "recommended from" subjects:
+
+```powershell
+.\.venv\Scripts\python.exe -m jobs.candidate_pool process-queue --limit 25 --chrome-binary-path "C:\Program Files\Google\Chrome\Application\chrome.exe"
+```
+
+The queue is resumable through PostgreSQL statuses. `movies` stores canonical metadata only; watched, wishlist, feedback, and candidate eligibility remain in separate tables.
 
 ## Run The API
 
@@ -83,8 +147,8 @@ Useful endpoints in the current slice:
 
 Recommended next implementation order:
 
-1. Excel viewing-history import with stable row hashes and duplicate prevention.
-2. PostgreSQL schema and repository layer.
-3. Douban matching review queue.
-4. Metadata enrichment and local candidate pool.
-5. React frontend for recommendations and wishlist.
+1. Run the auto-matched import job against a real PostgreSQL database and inspect persisted data quality.
+2. Build the local candidate pool tables and ingestion path.
+3. Add the manual Douban match review queue and API.
+4. Switch recommendation reads from the in-memory sample catalog to persisted movies/candidates.
+5. Add the React recommendation and wishlist UI.

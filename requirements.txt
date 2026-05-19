@@ -1,2 +1,5 @@
 fastapi
+openpyxl
+psycopg[binary]
+selenium
 uvicorn[standard]

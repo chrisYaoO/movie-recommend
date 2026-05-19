@@ -188,6 +188,44 @@ active boolean
 created_at timestamptz
 ```
 
+### candidate_subject_queue
+
+Douban subject IDs discovered before metadata enrichment. This queue is the
+resumable boundary between discovery and detail-page fetching.
+
+```text
+douban_subject_id text primary key
+source_type text
+source_ref text
+source_subject_id text
+source_label text
+status text
+error text
+created_at timestamptz
+updated_at timestamptz
+```
+
+Initial discovery writes Top250 subjects with:
+
+```text
+source_type = douban_top250
+source_ref = top{rank}
+```
+
+Candidate queue processing is intentionally one layer deep for the first
+version:
+
+```text
+Top250 subject
+-> enrich movie detail
+-> add movie to candidate_pool
+-> discover "喜欢这部电影的人也喜欢" subject IDs
+-> enqueue recommended subjects with source_ref = recommended_from:{subject_id}
+```
+
+Recommended subjects are queued for later enrichment but their own
+recommendations are not expanded in the first version.
+
 ### recommendation_sessions
 
 One click-generated batch.

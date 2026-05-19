@@ -3,3 +3,8 @@ __pycache__/
 *.py[cod]
 .pytest_cache/
 .env
+data/imports/*
+!data/imports/.gitkeep
+data/cache/
+*.sqlite3
+*.db

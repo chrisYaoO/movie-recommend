@@ -138,6 +138,21 @@ Candidate sources should include:
 
 Candidate collection runs as a low-speed background import job, not as part of real-time recommendation.
 
+The first candidate ingestion path is split into discovery and enrichment:
+
+```text
+discover Douban Top250 subject IDs
+-> queue with source_type=douban_top250 and source_ref=top{rank}
+-> process queue with resumable status
+-> enrich missing movie details into movies
+-> activate candidates in candidate_pool
+-> enqueue one-layer "recommended from {movie}" subject IDs
+```
+
+The first version expands only `Top250 -> one layer of recommendations`.
+Recommended subjects are queued and enriched, but their own recommendations are
+not recursively expanded.
+
 ## Persistence
 
 ### PostgreSQL As System Of Record
@@ -152,6 +167,7 @@ PostgreSQL should store:
 - enriched movie metadata
 - viewing history
 - candidate pool entries
+- candidate subject queue entries
 - recommendation sessions and returned items
 - feedback events
 - wishlist state

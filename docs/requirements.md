@@ -61,6 +61,9 @@ Course-style reinforcement learning recommendation projects are references only.
   - movies similar to the user's high-rated history
   - diversity-filling pools for genre, country, and era coverage
 - Candidate ingestion runs as a background/import job, not inside the live recommendation path.
+- The first Top250 discovery stores `source_ref=top{rank}` instead of a separate rank field.
+- Candidate queue processing must be resumable and should only expand `Top250 -> one layer of recommendations` in the first version.
+- Movie user state must not be stored on `movies`; derive watched state from `viewing_history`, want-to-watch from `wishlist`, negative interest from `feedback`, and candidate eligibility from `candidate_pool`.
 
 ### Recommendation Session
 
