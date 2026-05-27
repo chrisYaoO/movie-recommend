@@ -12,6 +12,8 @@ from selenium.common.exceptions import TimeoutException
 from backend.app.models.domain import DoubanMovieDetail
 
 
+DEFAULT_CHROME_BINARY_PATH = r"C:\Program Files\Google\Chrome\Application\chrome.exe"
+
 
 class DoubanDetailAdapter(Protocol):
     def fetch(self, subject_id: str) -> DoubanMovieDetail:
@@ -54,7 +56,7 @@ class DoubanHttpDetailAdapter:
             html = response.read().decode("utf-8", errors="replace")
         self.last_request_at = time.monotonic()
         detail = parse_douban_movie_detail(subject_id, html, url)
-        if not detail.title or detail.title == "璞嗙摚":
+        if _is_invalid_detail_title(detail.title):
             raise ValueError("Douban detail page did not contain movie metadata")
         return detail
 
@@ -103,7 +105,7 @@ class DoubanSeleniumDetailAdapter:
         self.last_request_at = time.monotonic()
 
         detail = parse_douban_movie_detail(subject_id, driver.page_source, url)
-        if not detail.title or detail.title == "璞嗙摚":
+        if _is_invalid_detail_title(detail.title):
             raise ValueError("Douban detail page did not contain movie metadata")
         return detail
 
@@ -167,11 +169,15 @@ class DoubanSeleniumDetailAdapter:
 
 def parse_douban_movie_detail(subject_id: str, html: str, url: str | None = None) -> DoubanMovieDetail:
     structured = _extract_json_ld_detail(html)
-    title = structured.get("title") or _extract_title(html) or ""
+    display_title = _extract_title(html)
     info_text = _extract_info_text(html)
+    title = structured.get("title") or display_title or ""
     return DoubanMovieDetail(
         subject_id=subject_id,
         title=title,
+        display_title=display_title,
+        original_title=_extract_original_title(info_text),
+        aka_titles=_extract_aka_titles(info_text),
         year=structured.get("year") or _extract_year_from_title_or_info(title, info_text),
         directors=_normalize_directors(
             structured.get("directors") or tuple(_extract_people_by_rel(html, "v:directedBy"))
@@ -185,6 +191,12 @@ def parse_douban_movie_detail(subject_id: str, html: str, url: str | None = None
         poster_url=structured.get("poster_url") or _extract_poster_url(html),
         url=url or f"https://movie.douban.com/subject/{subject_id}/",
     )
+
+
+def _is_invalid_detail_title(title: str | None) -> bool:
+    if not title:
+        return True
+    return title.strip() in {"璞嗙摚", "豆瓣", "떴곌"}
 
 
 def _extract_json_ld_detail(html: str) -> dict:
@@ -333,6 +345,30 @@ def _extract_labeled_values(info_text: str, label: str) -> tuple[str, ...]:
         return ()
     value = match.group(1)
     return tuple(part.strip() for part in value.split("/") if part.strip())
+
+
+def _extract_original_title(info_text: str) -> str | None:
+    return _extract_labeled_text(info_text, ("原名", "鍘熷悕"))
+
+
+def _extract_aka_titles(info_text: str) -> tuple[str, ...]:
+    value = _extract_labeled_text(info_text, ("又名", "鍙堝悕"))
+    if value is None:
+        return ()
+    return tuple(part.strip() for part in value.split("/") if part.strip())
+
+
+def _extract_labeled_text(info_text: str, labels: tuple[str, ...]) -> str | None:
+    for label in labels:
+        marker = f"{label}:"
+        if marker not in info_text:
+            continue
+        value = info_text.split(marker, 1)[1].strip()
+        next_label = re.search(r"\s+[^\s:：]{2,12}[:：]", value)
+        if next_label is not None:
+            value = value[: next_label.start()].strip()
+        return value or None
+    return None
 
 
 def _extract_year_from_title_or_info(title: str, info_text: str) -> int | None:

@@ -67,6 +67,7 @@ class MetadataServiceTest(unittest.TestCase):
 
         self.assertEqual("2222996", detail.subject_id)
         self.assertEqual("姝ュ饱涓嶅仠 姝┿亜銇︺倐 姝┿亜銇︺倐", detail.title)
+        self.assertEqual("姝ュ饱涓嶅仠 姝┿亜銇︺倐 姝┿亜銇︺倐", detail.display_title)
         self.assertEqual(2008, detail.year)
         self.assertEqual(("Hirokazu Kore-eda",), detail.directors)
         self.assertEqual(("Hiroshi Abe", "Yui Natsukawa"), detail.actors)
@@ -116,6 +117,27 @@ class MetadataServiceTest(unittest.TestCase):
         self.assertEqual("A family gathers for a day.", detail.summary)
         self.assertEqual("https://img.example/p123456.webp", detail.poster_url)
         self.assertEqual("https://movie.douban.com/subject/2222996/", detail.url)
+
+    def test_parse_douban_movie_detail_extracts_bilingual_title_fields(self) -> None:
+        html = """
+        <html>
+          <body>
+            <span property="v:itemreviewed">肖申克的救赎 The Shawshank Redemption</span>
+            <div id="info">
+              原名: The Shawshank Redemption<br>
+              又名: 月黑高飞 / 刺激1995<br>
+              制片国家/地区: 美国<br>
+            </div>
+          </body>
+        </html>
+        """
+
+        detail = parse_douban_movie_detail("1292052", html)
+
+        self.assertEqual("肖申克的救赎 The Shawshank Redemption", detail.title)
+        self.assertEqual("肖申克的救赎 The Shawshank Redemption", detail.display_title)
+        self.assertEqual("The Shawshank Redemption", detail.original_title)
+        self.assertEqual(("月黑高飞", "刺激1995"), detail.aka_titles)
 
     def test_http_detail_adapter_fetches_desktop_subject_page(self) -> None:
         html = """
@@ -200,6 +222,29 @@ class MetadataServiceTest(unittest.TestCase):
 
         self.assertEqual("No Json LD Movie", detail.title)
         self.assertEqual(2021, detail.year)
+
+    def test_detail_adapters_reject_generic_douban_title_without_movie_metadata(self) -> None:
+        html = "<html><head><title>豆瓣</title></head><body></body></html>"
+
+        with patch("backend.app.services.metadata_service.urlopen", return_value=_FakeHttpResponse(html)):
+            with self.assertRaisesRegex(ValueError, "did not contain movie metadata"):
+                DoubanHttpDetailAdapter(delay_seconds=0).fetch("1291556")
+
+        driver = _FakeWebDriver(html)
+        with DoubanSeleniumDetailAdapter(
+            delay_seconds=0,
+            driver_factory=lambda: driver,
+            wait_for_json_ld=False,
+        ) as adapter:
+            with self.assertRaisesRegex(ValueError, "did not contain movie metadata"):
+                adapter.fetch("1291556")
+
+    def test_detail_adapter_rejects_mojibake_generic_douban_title(self) -> None:
+        html = "<html><head><title>떴곌</title></head><body></body></html>"
+
+        with patch("backend.app.services.metadata_service.urlopen", return_value=_FakeHttpResponse(html)):
+            with self.assertRaisesRegex(ValueError, "did not contain movie metadata"):
+                DoubanHttpDetailAdapter(delay_seconds=0).fetch("1291556")
 
 if __name__ == "__main__":
     unittest.main()

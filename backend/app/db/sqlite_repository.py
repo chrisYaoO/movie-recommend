@@ -40,6 +40,9 @@ class SQLiteViewingHistoryRepository:
                 douban_subject_id TEXT NOT NULL UNIQUE,
                 douban_url TEXT,
                 title TEXT NOT NULL,
+                display_title TEXT,
+                original_title TEXT,
+                aka_titles_json TEXT NOT NULL DEFAULT '[]',
                 year INTEGER,
                 directors_json TEXT NOT NULL,
                 actors_json TEXT NOT NULL,
@@ -91,9 +94,34 @@ class SQLiteViewingHistoryRepository:
                 updated_at TEXT NOT NULL,
                 UNIQUE(movie_id, source_type, source_ref)
             );
+
+            CREATE TABLE IF NOT EXISTS history_recommendation_discovery (
+                douban_subject_id TEXT PRIMARY KEY,
+                status TEXT NOT NULL,
+                error TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            """
+        )
+        self._add_column_if_missing("movies", "display_title", "TEXT")
+        self._add_column_if_missing("movies", "original_title", "TEXT")
+        self._add_column_if_missing("movies", "aka_titles_json", "TEXT NOT NULL DEFAULT '[]'")
+        self.connection.execute(
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_viewing_history_source_row
+            ON viewing_history(source_file, source_row_number)
             """
         )
         self.connection.commit()
+
+    def _add_column_if_missing(self, table_name: str, column_name: str, column_definition: str) -> None:
+        columns = {
+            row["name"]
+            for row in self.connection.execute(f"PRAGMA table_info({table_name})").fetchall()
+        }
+        if column_name not in columns:
+            self.connection.execute(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_definition}")
 
     def persist_confirmed_viewing_history(
         self,
@@ -123,6 +151,101 @@ class SQLiteViewingHistoryRepository:
             title=str(row["title"]),
         )
 
+    def find_watched_movies(self, limit: int | None = None) -> list[PersistedMovie]:
+        sql = """
+            SELECT m.id, m.douban_subject_id, m.title, MIN(vh.created_at) AS first_watched_created_at
+            FROM viewing_history vh
+            JOIN movies m ON m.id = vh.movie_id
+            GROUP BY m.id, m.douban_subject_id, m.title
+            ORDER BY first_watched_created_at, m.douban_subject_id
+        """
+        params: tuple[int, ...] = ()
+        if limit is not None:
+            sql += " LIMIT ?"
+            params = (limit,)
+        rows = self.connection.execute(sql, params).fetchall()
+        return [
+            PersistedMovie(
+                id=str(row["id"]),
+                douban_subject_id=str(row["douban_subject_id"]),
+                title=str(row["title"]),
+            )
+            for row in rows
+        ]
+
+    def find_unprocessed_watched_movies_for_history_recommendations(
+        self,
+        limit: int | None = None,
+    ) -> list[PersistedMovie]:
+        sql = """
+            SELECT watched.id, watched.douban_subject_id, watched.title
+            FROM (
+                SELECT m.id, m.douban_subject_id, m.title, MIN(vh.created_at) AS first_watched_created_at
+                FROM viewing_history vh
+                JOIN movies m ON m.id = vh.movie_id
+                GROUP BY m.id, m.douban_subject_id, m.title
+            ) watched
+            LEFT JOIN history_recommendation_discovery discovery
+                ON discovery.douban_subject_id = watched.douban_subject_id
+                AND discovery.status = 'completed'
+            WHERE discovery.douban_subject_id IS NULL
+            ORDER BY watched.first_watched_created_at, watched.douban_subject_id
+        """
+        params: tuple[int, ...] = ()
+        if limit is not None:
+            sql += " LIMIT ?"
+            params = (limit,)
+        rows = self.connection.execute(sql, params).fetchall()
+        return [
+            PersistedMovie(
+                id=str(row["id"]),
+                douban_subject_id=str(row["douban_subject_id"]),
+                title=str(row["title"]),
+            )
+            for row in rows
+        ]
+
+    def count_unprocessed_watched_movies_for_history_recommendations(self) -> int:
+        return int(
+            self.connection.execute(
+                """
+                SELECT COUNT(*)
+                FROM (
+                    SELECT m.douban_subject_id
+                    FROM viewing_history vh
+                    JOIN movies m ON m.id = vh.movie_id
+                    GROUP BY m.id, m.douban_subject_id
+                ) watched
+                LEFT JOIN history_recommendation_discovery discovery
+                    ON discovery.douban_subject_id = watched.douban_subject_id
+                    AND discovery.status = 'completed'
+                WHERE discovery.douban_subject_id IS NULL
+                """
+            ).fetchone()[0]
+        )
+
+    def mark_history_recommendation_discovery_status(
+        self,
+        subject_id: str,
+        status: str,
+        error: str | None = None,
+    ) -> None:
+        now = _utc_now()
+        self.connection.execute(
+            """
+            INSERT INTO history_recommendation_discovery (
+                douban_subject_id, status, error, created_at, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(douban_subject_id) DO UPDATE SET
+                status = excluded.status,
+                error = excluded.error,
+                updated_at = excluded.updated_at
+            """,
+            (subject_id, status, error, now, now),
+        )
+        self.connection.commit()
+
     def upsert_movie_detail(self, detail: DoubanMovieDetail) -> PersistedMovie:
         existing = self.connection.execute(
             "SELECT id FROM movies WHERE douban_subject_id = ?",
@@ -134,15 +257,18 @@ class SQLiteViewingHistoryRepository:
         self.connection.execute(
             """
             INSERT INTO movies (
-                id, douban_subject_id, douban_url, title, year,
+                id, douban_subject_id, douban_url, title, display_title, original_title, aka_titles_json, year,
                 directors_json, actors_json, genres_json, countries_json,
                 douban_rating, douban_vote_count, summary, poster_url,
                 raw_douban_json, metadata_status, created_at, updated_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(douban_subject_id) DO UPDATE SET
                 douban_url = excluded.douban_url,
                 title = excluded.title,
+                display_title = excluded.display_title,
+                original_title = excluded.original_title,
+                aka_titles_json = excluded.aka_titles_json,
                 year = excluded.year,
                 directors_json = excluded.directors_json,
                 actors_json = excluded.actors_json,
@@ -161,6 +287,9 @@ class SQLiteViewingHistoryRepository:
                 detail.subject_id,
                 detail.url,
                 detail.title,
+                detail.display_title,
+                detail.original_title,
+                _json(detail.aka_titles),
                 detail.year,
                 _json(detail.directors),
                 _json(detail.actors),
@@ -188,8 +317,8 @@ class SQLiteViewingHistoryRepository:
             raise ValueError("source_row_hash is required when raw viewing history is not persisted")
 
         existing = self.connection.execute(
-            "SELECT id FROM viewing_history WHERE source_row_hash = ?",
-            (confirmed.source_row_hash,),
+            "SELECT id FROM viewing_history WHERE source_file = ? AND source_row_number = ?",
+            (confirmed.source_file, confirmed.source_row_number),
         ).fetchone()
         history_id = str(existing["id"]) if existing is not None else str(uuid4())
         now = _utc_now()
@@ -201,14 +330,13 @@ class SQLiteViewingHistoryRepository:
                 source_row_hash, source_file, source_row_number, created_at, updated_at
             )
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(source_row_hash) DO UPDATE SET
+            ON CONFLICT(source_file, source_row_number) DO UPDATE SET
                 movie_id = excluded.movie_id,
                 watched_date = excluded.watched_date,
                 user_rating = excluded.user_rating,
                 quality = excluded.quality,
                 comment = excluded.comment,
-                source_file = excluded.source_file,
-                source_row_number = excluded.source_row_number,
+                source_row_hash = excluded.source_row_hash,
                 updated_at = excluded.updated_at
             """,
             (
@@ -261,16 +389,23 @@ class SQLiteViewingHistoryRepository:
         return existing is None
 
     def find_pending_candidate_subjects(self, limit: int | None = None) -> list[CandidateSubjectQueueItem]:
+        return self.find_candidate_subjects_by_status("pending", limit=limit)
+
+    def find_candidate_subjects_by_status(
+        self,
+        status: str,
+        limit: int | None = None,
+    ) -> list[CandidateSubjectQueueItem]:
         sql = """
             SELECT douban_subject_id, source_type, source_ref, source_subject_id, source_label, status
             FROM candidate_subject_queue
-            WHERE status = 'pending'
+            WHERE status = ?
             ORDER BY created_at, douban_subject_id
         """
-        params: tuple[int, ...] = ()
+        params: tuple[str, ...] | tuple[str, int] = (status,)
         if limit is not None:
             sql += " LIMIT ?"
-            params = (limit,)
+            params = (status, limit)
         rows = self.connection.execute(sql, params).fetchall()
         return [
             CandidateSubjectQueueItem(
@@ -283,6 +418,14 @@ class SQLiteViewingHistoryRepository:
             )
             for row in rows
         ]
+
+    def count_candidate_subjects_by_status(self, status: str) -> int:
+        return int(
+            self.connection.execute(
+                "SELECT COUNT(*) FROM candidate_subject_queue WHERE status = ?",
+                (status,),
+            ).fetchone()[0]
+        )
 
     def mark_candidate_subject_status(self, subject_id: str, status: str, error: str | None = None) -> None:
         self.connection.execute(

@@ -23,6 +23,7 @@ This repository currently contains the first backend vertical slice:
 - Douban subject detail parsing and Selenium-backed enrichment job support
 - SQLite persistence for canonical `movies` and final `viewing_history`
 - PostgreSQL repository support for the same `movies` and `viewing_history` contract
+- PostgreSQL-backed recommendation reads from `movies`, `candidate_pool`, and `viewing_history`
 - focused unit tests for the core recommendation loop
 
 This slice still keeps live recommendation independent from Douban. External access belongs in import and enrichment jobs only.
@@ -38,6 +39,7 @@ backend/
     services/        Application services and in-memory repository
   tests/             Backend unit tests
 docs/                Requirements, architecture, and agent workflow docs
+frontend/            React UI for recommendations, search, and recording history
 ```
 
 ## Setup
@@ -78,7 +80,7 @@ $env:MOVIES_POSTGRES_DSN="postgresql://user:password@localhost:5432/movies_test"
 
 ## Import Auto-Matched History
 
-The current import job only persists automatically matched records. `needs_review` and `no_match` rows are counted and skipped; the manual review flow is intentionally left for a later slice.
+The current import job persists automatically matched records. It reads the whole workbook, persists rows with `DoubanSubjectId` / `movie_id` first, then processes rows without a subject id one at a time with resumable checkpoints in `data/cache/import-auto-match-progress.json`. `needs_review` and `no_match` rows are counted and skipped; use the review command below for manual confirmation.
 
 The CLI reads PostgreSQL connection settings from `--dsn`, `MOVIES_POSTGRES_DSN`, or local `.env`, in that order. A local `.env` should contain:
 
@@ -86,29 +88,77 @@ The CLI reads PostgreSQL connection settings from `--dsn`, `MOVIES_POSTGRES_DSN`
 MOVIES_POSTGRES_DSN=postgresql://user:password@localhost:5432/movies
 ```
 
+By default the Google Sheets job reads service account credentials from `.secrets/google-sheets-service-account.json`.
+The spreadsheet id should be stored in that JSON as `spreadsheet_id`; `.env` does not need a Google Sheets id for the normal path.
+
 ```powershell
 .\.venv\Scripts\python.exe -m jobs.import_auto_matched_history data\imports\MOVIES.xlsx
 ```
 
-For the first safe import from the current workbook, use only rows that already carry a Douban subject id:
+To import the current workbook, run:
 
 ```powershell
-.\.venv\Scripts\python.exe -m jobs.import_auto_matched_history data\imports\MOVIES.xlsx --subject-id-only --detail-adapter selenium --chrome-binary-path "C:\Program Files\Google\Chrome\Application\chrome.exe"
+.\.venv\Scripts\python.exe -m jobs.import_auto_matched_history data\imports\MOVIES.xlsx --detail-adapter selenium
 ```
 
-To process the remaining metadata-search rows safely, use the resumable mode. It searches one row at a time, persists each `AUTO_MATCHED` result immediately, writes progress to `data/cache/import-auto-match-progress.json`, and exits on the first error so the next run can resume from that node.
+Selenium jobs default to Chrome at `C:\Program Files\Google\Chrome\Application\chrome.exe`; pass `--chrome-binary-path` only when using a different Chrome executable.
+
+To read the same history directly from Google Sheets without changing existing source-row identity, run:
 
 ```powershell
-.\.venv\Scripts\python.exe -m jobs.import_auto_matched_history data\imports\MOVIES.xlsx --metadata-search-resume --detail-adapter selenium --chrome-binary-path "C:\Program Files\Google\Chrome\Application\chrome.exe"
-```（
+.\.venv\Scripts\python.exe -m jobs.sync_google_sheets_history --sheet 2026
+```
+
+To verify Google Sheets access without writing to PostgreSQL or fetching Douban details, run:
+
+```powershell
+.\.venv\Scripts\python.exe -m jobs.sync_google_sheets_history --sheet 2026 --limit 2 --dry-run
+```
+
+Share the Google Sheet with the `client_email` from the service account JSON. Use Editor access if this service account will later write back to the sheet. If you are syncing a public sheet, you can use an API key instead:
+
+```text
+GOOGLE_SHEETS_SPREADSHEET_ID=your-spreadsheet-id
+GOOGLE_SHEETS_API_KEY=your-api-key
+```
+
+```powershell
+.\.venv\Scripts\python.exe -m jobs.sync_google_sheets_history --sheet 2026
+```
+
+Repeat `--sheet` for multiple tabs. The default `--source-file-alias MOVIES.xlsx` is intentional: a Google Sheets row from tab `2026` is imported as `MOVIES.xlsx#2026` with the same row number and stable row hash as the downloaded Excel file, so already imported rows are updated rather than duplicated.
+
+To reclassify older `no_match` checkpoint rows whose only blocker was `douban_search_no_year_match`, run:
+
+```powershell
+.\.venv\Scripts\python.exe -m jobs.import_auto_matched_history data\imports\MOVIES.xlsx --retry-no-year-match-no-matches
+```
+
+This updates matching state only. Rows with search results move back to `needs_review`; only true search misses stay `no_match`.
 
 To manually review `needs_review` rows from the progress file, run:
 
 ```powershell
-.\.venv\Scripts\python.exe -m jobs.review_matched_history data\imports\MOVIES.xlsx --detail-adapter selenium --chrome-binary-path "C:\Program Files\Google\Chrome\Application\chrome.exe"
+.\.venv\Scripts\python.exe -m jobs.review_matched_history data\imports\MOVIES.xlsx --detail-adapter selenium
 ```
 
 For each row, press `Enter` to queue it for confirmation, enter `1` to reject it, or enter `q` to stop and resume later. The prompt only shows data already in the progress JSON so review stays fast; when the review loop exits, queued confirmations fetch Douban detail pages and persist the detail-page title as the canonical movie title.
+
+To manually resolve `review_rejected` and `no_match` rows by entering a Douban subject id, run:
+
+```powershell
+.\.venv\Scripts\python.exe -m jobs.review_matched_history data\imports\MOVIES.xlsx --resolve-rejected-and-no-match --detail-adapter selenium
+```
+
+For each row, enter a Douban subject id or subject URL to fetch and preview the detail page, then press `Enter` to persist it or enter `1` to discard it. Enter `a` to run a fresh Douban search, without reusing the progress JSON or local search cache, and update the row to `auto_matched_persisted`, `needs_review`, or `no_match` under the current matching rules. Enter `x` at the subject-id prompt to discard without fetching, or `q` to stop and resume later.
+
+To run that fresh Douban search retry in batch for `review_rejected` and `no_match` rows, run:
+
+```powershell
+.\.venv\Scripts\python.exe -m jobs.review_matched_history data\imports\MOVIES.xlsx --batch-search-rejected-and-no-match --detail-adapter selenium
+```
+
+Use `--limit N` to process a smaller batch. Each row prints the fresh search status and candidate subject id/title/year.
 
 ## Build Candidate Pool
 
@@ -118,10 +168,34 @@ Queue Douban Top250 subject IDs with `source_type=douban_top250` and `source_ref
 .\.venv\Scripts\python.exe -m jobs.candidate_pool discover-top250
 ```
 
+Queue one layer of Douban recommendations from every unprocessed watched movie:
+
+```powershell
+.\.venv\Scripts\python.exe -m jobs.candidate_pool discover-history-recommendations
+```
+
+This command records completed watched movies in `history_recommendation_discovery`, so it can resume from the remaining unprocessed viewing-history movies. Failed watched movies stay unprocessed and are retried on the next run. Use `--limit N` only when you want a smaller batch:
+
+```powershell
+.\.venv\Scripts\python.exe -m jobs.candidate_pool discover-history-recommendations --limit 25
+```
+
 Process queued subjects, enrich missing movie details, add movies to `candidate_pool`, and enqueue one layer of "recommended from" subjects:
 
 ```powershell
-.\.venv\Scripts\python.exe -m jobs.candidate_pool process-queue --limit 25 --chrome-binary-path "C:\Program Files\Google\Chrome\Application\chrome.exe"
+.\.venv\Scripts\python.exe -m jobs.candidate_pool process-queue --limit 25
+```
+
+Use `--limit N` to process a different batch size:
+
+```powershell
+.\.venv\Scripts\python.exe -m jobs.candidate_pool process-queue --limit 50
+```
+
+To retry failed queue rows, run:
+
+```powershell
+.\.venv\Scripts\python.exe -m jobs.candidate_pool process-queue --retry-failed --limit 25
 ```
 
 The queue is resumable through PostgreSQL statuses. `movies` stores canonical metadata only; watched, wishlist, feedback, and candidate eligibility remain in separate tables.
@@ -131,24 +205,95 @@ The queue is resumable through PostgreSQL statuses. `movies` stores canonical me
 After installing dependencies:
 
 ```powershell
-uvicorn backend.app.main:app --reload
+.\.venv\Scripts\python.exe -m uvicorn backend.app.main:app --reload
 ```
+
+By default the API uses the in-memory seed catalog. To read recommendation candidates from PostgreSQL, first build/import `movies` and `candidate_pool`, then add these settings to local `.env`:
+
+```powershell
+MOVIES_RECOMMENDATION_BACKEND=postgres
+MOVIES_POSTGRES_DSN=postgresql://user:password@localhost:5432/movies
+```
+
+The backend loads `.env` automatically at startup, while real process environment variables still take precedence for temporary overrides.
 
 Useful endpoints in the current slice:
 
+- `GET /movies/search?q=Still%20Walking`
+- `POST /viewing-history`
 - `GET /recommendations?strategy=hybrid`
+- `GET /recommendations?strategy=hybrid&seed=42`
 - `GET /recommendations?strategy=popularity`
 - `GET /recommendations?strategy=content`
 - `POST /recommendations/{session_id}/items/{item_id}/feedback`
 - `GET /wishlist`
 - `POST /wishlist/{wishlist_id}/watched`
 
+To record a watched movie selected from search:
+
+```json
+{
+  "douban_subject_id": "2222996",
+  "watched_date": "2026-05-26",
+  "rating": 4.5,
+  "quality": "1080p",
+  "comment": "quietly great",
+  "sheet": "2026"
+}
+```
+
+The API appends the row to Google Sheets first, then writes `movies` and `viewing_history` with `source_file=MOVIES.xlsx#<sheet>` and the appended sheet row number.
+
+## Run The Frontend
+
+Start the API first, then run the React UI:
+
+```powershell
+cd frontend
+npm install
+npm run dev
+```
+
+The dev server proxies API requests to `http://127.0.0.1:8000`, so the browser should use the Vite URL printed by `npm run dev`, usually `http://127.0.0.1:5173/`.
+
+## Recommendation Scoring
+
+The current baseline scoring rules live in `backend/app/recommenders/simple.py`.
+
+The implementation provides:
+
+- `popularity_score`: combines Douban rating and log-scaled vote count.
+- `content_score`: builds positive and negative feature profiles from viewing history ratings.
+- `hybrid_score`: combines personal preference, public quality, and a small novelty bonus.
+- `diversity_gain`: batch-local diversity for the two explore slots.
+
+See [docs/architecture.md](docs/architecture.md#recommendation-strategy) for the exact formulas and the 3 exploit / 2 explore selection rule.
+
+To inspect recommendation output quality against PostgreSQL data, run:
+
+```powershell
+.\.venv\Scripts\python.exe -m jobs.evaluate_recommendations --strategy hybrid --runs 10
+```
+
+To make explore-slot randomness reproducible while evaluating, pass a seed:
+
+```powershell
+.\.venv\Scripts\python.exe -m jobs.evaluate_recommendations --strategy hybrid --runs 10 --seed 42
+```
+
+The report prints:
+
+- `candidate_pool_health`: active pool size, recommendation-eligible size, queue status counts, active source mix, and missing metadata counts.
+- recommendation runs: each returned item with slot type, score, rating, watched flag, and pool source.
+- `summary`: unique movies, slot mix, source mix, repeated movies, duplicate items within a session, and watched-movie leakage.
+
+Use this as the daily check after each candidate-pool batch. The first hard gates are `watched_leak_count=0`, `duplicate_in_session_count=0`, and `eligible_unique_movies >= 5`; after the pool grows, watch whether `repeated_movies` and `active_source_mix` show over-concentration.
+
 ## Next Tasks
 
 Recommended next implementation order:
 
-1. Run the auto-matched import job against a real PostgreSQL database and inspect persisted data quality.
-2. Build the local candidate pool tables and ingestion path.
-3. Add the manual Douban match review queue and API.
-4. Switch recommendation reads from the in-memory sample catalog to persisted movies/candidates.
-5. Add the React recommendation and wishlist UI.
+1. Wire the React UI to the PostgreSQL-backed API in a local end-to-end run.
+2. Add the final "record watched" validation states around Google Sheets write failures and duplicate local rows.
+3. Persist wishlist and feedback against PostgreSQL instead of keeping them process-local.
+4. Continue candidate-pool enrichment and use `jobs.evaluate_recommendations` as the daily health check.

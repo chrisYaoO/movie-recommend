@@ -53,6 +53,26 @@ class ViewingHistoryRepository(Protocol):
     def find_movie_by_subject_id(self, subject_id: str) -> PersistedMovie | None:
         pass
 
+    def find_watched_movies(self, limit: int | None = None) -> list[PersistedMovie]:
+        pass
+
+    def find_unprocessed_watched_movies_for_history_recommendations(
+        self,
+        limit: int | None = None,
+    ) -> list[PersistedMovie]:
+        pass
+
+    def count_unprocessed_watched_movies_for_history_recommendations(self) -> int:
+        pass
+
+    def mark_history_recommendation_discovery_status(
+        self,
+        subject_id: str,
+        status: str,
+        error: str | None = None,
+    ) -> None:
+        pass
+
     def upsert_movie_detail(self, detail: DoubanMovieDetail) -> PersistedMovie:
         pass
 
@@ -74,6 +94,16 @@ class ViewingHistoryRepository(Protocol):
         pass
 
     def find_pending_candidate_subjects(self, limit: int | None = None) -> list[CandidateSubjectQueueItem]:
+        pass
+
+    def find_candidate_subjects_by_status(
+        self,
+        status: str,
+        limit: int | None = None,
+    ) -> list[CandidateSubjectQueueItem]:
+        pass
+
+    def count_candidate_subjects_by_status(self, status: str) -> int:
         pass
 
     def mark_candidate_subject_status(self, subject_id: str, status: str, error: str | None = None) -> None:

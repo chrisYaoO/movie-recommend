@@ -401,6 +401,34 @@ class MatchingServiceTest(unittest.TestCase):
         self.assertEqual(DoubanMatchStatus.AUTO_MATCHED, result.candidates[0].status)
         self.assertEqual("2222996", result.candidates[0].candidate_subject_id)
 
+    def test_search_match_job_prefers_exact_title_before_first_year_match(self) -> None:
+        queue = build_douban_match_inputs(
+            [
+                ViewingHistoryCandidate(
+                    source_raw_id="raw-1",
+                    source_file="MOVIES.xlsx#2023",
+                    source_row_number=75,
+                    title="消失的她",
+                    user_rating=4.0,
+                    release_year=2023,
+                ),
+            ]
+        )
+        adapter = FakeDoubanSearchAdapter(
+            {
+                "消失的她": [
+                    DoubanSearchResult(subject_id="wrong", title="消失的她之豪门千金", year=2023),
+                    DoubanSearchResult(subject_id="right", title="消失的她", year=2023),
+                ]
+            }
+        )
+
+        result = run_search_match_job(queue.inputs, adapter)
+
+        self.assertEqual(DoubanMatchStatus.AUTO_MATCHED, result.candidates[0].status)
+        self.assertEqual("right", result.candidates[0].candidate_subject_id)
+        self.assertEqual(("title_year_exact",), result.candidates[0].match_reasons)
+
     def test_search_match_job_keeps_title_difference_for_review_even_when_year_matches(self) -> None:
         queue = build_douban_match_inputs(
             [
@@ -428,7 +456,7 @@ class MatchingServiceTest(unittest.TestCase):
         self.assertEqual(0.75, result.candidates[0].match_score)
         self.assertEqual(("year_match_title_differs",), result.candidates[0].match_reasons)
 
-    def test_search_match_job_marks_no_match_when_no_result_year_matches(self) -> None:
+    def test_search_match_job_marks_needs_review_when_no_result_year_matches(self) -> None:
         queue = build_douban_match_inputs(
             [
                 ViewingHistoryCandidate(
@@ -444,15 +472,16 @@ class MatchingServiceTest(unittest.TestCase):
         adapter = FakeDoubanSearchAdapter(
             {
                 "Still Walking": [
-                    DoubanSearchResult(subject_id="wrong", title="Still Walking", year=2019),
+                    DoubanSearchResult(subject_id="wrong", title="Walking Still", year=2019),
                 ]
             }
         )
 
         result = run_search_match_job(queue.inputs, adapter)
 
-        self.assertEqual(DoubanMatchStatus.NO_MATCH, result.candidates[0].status)
+        self.assertEqual(DoubanMatchStatus.NEEDS_REVIEW, result.candidates[0].status)
         self.assertEqual(("douban_search_no_year_match",), result.candidates[0].match_reasons)
+        self.assertEqual("wrong", result.candidates[0].candidate_subject_id)
 
     def test_cached_search_adapter_reuses_results_by_normalized_metadata_key(self) -> None:
         first = ViewingHistoryCandidate(
@@ -545,12 +574,20 @@ class MatchingServiceTest(unittest.TestCase):
             match_input,
             DoubanSearchResult(subject_id="2222996", title="Still Walking", year=2019),
         )
+        wrong_title_and_year = score_search_result(
+            match_input,
+            DoubanSearchResult(subject_id="2222996", title="Walking Still", year=2019),
+        )
 
         self.assertEqual(DoubanMatchStatus.AUTO_MATCHED, exact.status)
         self.assertEqual(0.95, exact.score)
         self.assertEqual(DoubanMatchStatus.NEEDS_REVIEW, different_title.status)
         self.assertEqual(0.75, different_title.score)
-        self.assertEqual(DoubanMatchStatus.NO_MATCH, wrong_year.status)
+        self.assertEqual(DoubanMatchStatus.AUTO_MATCHED, wrong_year.status)
+        self.assertEqual(0.9, wrong_year.score)
+        self.assertEqual("title_exact_year_differs", wrong_year.reason)
+        self.assertEqual(DoubanMatchStatus.NEEDS_REVIEW, wrong_title_and_year.status)
+        self.assertEqual(0.5, wrong_title_and_year.score)
 
     def test_parse_douban_search_results_extracts_subject_title_year_and_director(self) -> None:
         html = """

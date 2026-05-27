@@ -3,8 +3,14 @@ __pycache__/
 *.py[cod]
 .pytest_cache/
 .env
+.secrets/
+movie-*.json
+*service-account*.json
+*credentials*.json
 data/imports/*
 !data/imports/.gitkeep
 data/cache/
 *.sqlite3
 *.db
+frontend/node_modules/
+frontend/dist/

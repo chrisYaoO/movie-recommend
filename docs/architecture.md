@@ -322,7 +322,7 @@ Before scoring:
 Ranks by public quality:
 
 ```text
-score = f(douban_rating, douban_vote_count)
+score = douban_rating * 0.75 + log10(max(douban_vote_count, 1)) * 0.25
 ```
 
 Use vote count to avoid overrating obscure movies with tiny sample sizes.
@@ -346,6 +346,53 @@ Feature groups:
 
 Score candidates by similarity to the positive profile minus similarity to the negative profile.
 
+Current implementation in `backend/app/recommenders/simple.py`:
+
+`content_score` is the personal-preference part of the baseline recommender. It asks:
+
+```text
+How much does this candidate look like movies the user rated highly,
+minus how much it looks like movies the user rated poorly?
+```
+
+It builds two feature profiles from `viewing_history`:
+
+- `positive_profile`: features from watched movies with rating >= 4.0
+- `negative_profile`: features from watched movies with rating < 4.0
+
+Each movie contributes simple metadata features:
+
+```text
+features(movie) =
+  genres
+  countries
+  directors
+  first three actors
+  decade
+```
+
+Rating controls how strongly watched movie features are added:
+
+```text
+positive_profile:
+  rating >= 4.5        -> each feature weight +1.0
+  4.0 <= rating < 4.5  -> each feature weight +0.6
+
+negative_profile:
+  rating < 4.0         -> each feature weight +1.0
+```
+
+For a candidate, the score sums the candidate's matching positive weights, subtracts matching negative weights, then divides by the candidate's own feature count:
+
+```text
+content_score(candidate) =
+  (sum positive weights for candidate features
+   - sum negative weights for candidate features)
+  / max(candidate feature count, 1)
+```
+
+A candidate scores higher when its genres, countries, directors, top actors, or decade appear often in highly rated viewing history. It scores lower when those same kinds of features appear in low-rated viewing history.
+
 ### Hybrid Recommender
 
 Recommended first production strategy:
@@ -365,6 +412,60 @@ The returned batch should contain:
 
 - three exploit items with high hybrid_score
 - two explore items selected to increase diversity across genre, country, era, director, or popularity level
+
+Current simple baseline implementation:
+
+```text
+public_quality = douban_rating * 0.75 + log10(max(douban_vote_count, 1)) * 0.25
+personal_preference = content_score(candidate)
+novelty = 0.3 if douban_vote_count < 100000 else 0.0
+
+hybrid_total =
+  personal_preference * 0.45
+  + public_quality * 0.45
+  + novelty * 0.10
+```
+
+The service first scores every eligible candidate, sorts by `hybrid_total`, and assigns:
+
+```text
+exploit slots = top 3 by hybrid_total
+```
+
+Then it selects two explore slots from the remaining candidates. Explore selection
+first ranks remaining candidates by:
+
+```text
+explore_rank_score = diversity_gain * 0.65 + hybrid_total * 0.35
+```
+
+Each explore slot samples from the top-ranked explore pool with weights derived
+from `explore_rank_score`. This keeps explore candidates quality-bounded while
+allowing repeated recommendation sessions to vary. Passing an explore seed makes
+the sampling reproducible for API checks and evaluation runs.
+
+`diversity_gain` compares the candidate against movies already selected in the current batch:
+
+```text
+genre_gain =
+  count(candidate genres not already selected)
+  / max(candidate genre count, 1)
+
+country_gain =
+  count(candidate countries not already selected)
+  / max(candidate country count, 1)
+
+decade_gain =
+  1.0 if candidate decade has not appeared in selected movies
+  else 0.0
+
+diversity_gain =
+  genre_gain * 0.45
+  + country_gain * 0.35
+  + decade_gain * 0.20
+```
+
+This diversity score is batch-local. It prevents a single recommendation session from returning five very similar movies; it does not measure novelty against the user's full viewing history.
 
 ### Feedback Weights
 

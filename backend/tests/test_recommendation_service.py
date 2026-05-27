@@ -1,12 +1,16 @@
 from datetime import date
+import os
 import unittest
+from unittest.mock import patch
 
 from backend.app.models.domain import FeedbackType, SlotType, WishlistStatus
 from backend.app.services.recommendation_service import (
     FeedbackRequest,
     InMemoryMovieRepository,
+    PostgresRecommendationRepository,
     RecommendationService,
     RecordWatchedRequest,
+    create_recommendation_service,
 )
 
 
@@ -23,6 +27,24 @@ class RecommendationServiceTest(unittest.TestCase):
         self.assertEqual(3, sum(1 for item in session.items if item.slot_type == SlotType.EXPLOIT))
         self.assertEqual(2, sum(1 for item in session.items if item.slot_type == SlotType.EXPLORE))
         self.assertEqual(5, len({item.movie.id for item in session.items}))
+
+    def test_explore_seed_makes_explore_slots_reproducible_without_changing_exploit_slots(self) -> None:
+        first = self.service.recommend("hybrid", explore_seed=1)
+        repeated = self.service.recommend("hybrid", explore_seed=1)
+        different = self.service.recommend("hybrid", explore_seed=2)
+
+        self.assertEqual(
+            [item.movie.id for item in first.items],
+            [item.movie.id for item in repeated.items],
+        )
+        self.assertEqual(
+            [item.movie.id for item in first.items[:3]],
+            [item.movie.id for item in different.items[:3]],
+        )
+        self.assertNotEqual(
+            [item.movie.id for item in first.items[3:]],
+            [item.movie.id for item in different.items[3:]],
+        )
 
     def test_want_to_watch_adds_wishlist_and_excludes_movie_from_future_sessions(self) -> None:
         session = self.service.recommend("hybrid")
@@ -63,6 +85,37 @@ class RecommendationServiceTest(unittest.TestCase):
         self.assertEqual(WishlistStatus.WATCHED, wishlist_item.status)
         self.assertEqual(first_item.movie.id, history.movie_id)
         self.assertIn(history, self.repository.history)
+
+    def test_create_recommendation_service_defaults_to_in_memory_repository(self) -> None:
+        with patch.dict(os.environ, {}, clear=True):
+            service = create_recommendation_service()
+
+        self.assertIsInstance(service.repository, InMemoryMovieRepository)
+
+    def test_postgres_repository_maps_database_movie_rows_to_domain_movies(self) -> None:
+        repository = PostgresRecommendationRepository.__new__(PostgresRecommendationRepository)
+
+        movie = repository._movie_from_row(
+            {
+                "id": "movie-1",
+                "douban_subject_id": "1292052",
+                "douban_url": None,
+                "title": "The Shawshank Redemption",
+                "year": 1994,
+                "directors": ["Frank Darabont"],
+                "actors": '["Tim Robbins", "Morgan Freeman"]',
+                "genres": ["Drama"],
+                "countries": ["United States"],
+                "douban_rating": "9.7",
+                "douban_vote_count": "3100000",
+            }
+        )
+
+        self.assertEqual("movie-1", movie.id)
+        self.assertEqual("The Shawshank Redemption", movie.title)
+        self.assertEqual(("Frank Darabont",), movie.directors)
+        self.assertEqual(("Tim Robbins", "Morgan Freeman"), movie.actors)
+        self.assertEqual("https://movie.douban.com/subject/1292052/", movie.douban_url)
 
 
 if __name__ == "__main__":

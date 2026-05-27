@@ -28,6 +28,9 @@ class SQLiteViewingHistoryRepositoryTest(unittest.TestCase):
         self.assertEqual("1291992", result.movie.douban_subject_id)
         self.assertEqual("1291992", movie["douban_subject_id"])
         self.assertEqual("末路狂花 Thelma & Louise", movie["title"])
+        self.assertEqual("末路狂花 Thelma & Louise", movie["display_title"])
+        self.assertEqual("Thelma & Louise", movie["original_title"])
+        self.assertEqual(["塞尔玛与路易丝"], json.loads(movie["aka_titles_json"]))
         self.assertEqual(["Ridley Scott"], json.loads(movie["directors_json"]))
         self.assertEqual(["剧情", "惊悚", "犯罪"], json.loads(movie["genres_json"]))
         self.assertEqual(9.0, movie["douban_rating"])
@@ -65,6 +68,29 @@ class SQLiteViewingHistoryRepositoryTest(unittest.TestCase):
         self.assertEqual(1, movie_count)
         self.assertEqual(1, history_count)
         self.assertEqual(9.0, movie["douban_rating"])
+        self.assertEqual(4.5, history["user_rating"])
+        self.assertEqual("updated", history["comment"])
+
+    def test_reimport_same_source_row_with_changed_hash_updates_existing_history(self) -> None:
+        with TemporaryDirectory() as directory:
+            db_path = Path(directory) / "movies.db"
+            with SQLiteViewingHistoryRepository(db_path) as repository:
+                repository.initialize_schema()
+                first = repository.persist_confirmed_viewing_history(
+                    _confirmed(source_row_hash="hash-before", rating=4.0, comment="first"),
+                    _detail(rating=8.9),
+                )
+                second = repository.persist_confirmed_viewing_history(
+                    _confirmed(source_row_hash="hash-after", rating=4.5, comment="updated"),
+                    _detail(rating=9.0),
+                )
+
+                history_count = repository.connection.execute("SELECT COUNT(*) FROM viewing_history").fetchone()[0]
+                history = repository.connection.execute("SELECT * FROM viewing_history").fetchone()
+
+        self.assertEqual(first.history.id, second.history.id)
+        self.assertEqual(1, history_count)
+        self.assertEqual("hash-after", history["source_row_hash"])
         self.assertEqual(4.5, history["user_rating"])
         self.assertEqual("updated", history["comment"])
 
@@ -114,6 +140,9 @@ def _detail(subject_id: str = "1291992", rating: float = 9.0) -> DoubanMovieDeta
     return DoubanMovieDetail(
         subject_id=subject_id,
         title="末路狂花 Thelma & Louise",
+        display_title="末路狂花 Thelma & Louise",
+        original_title="Thelma & Louise",
+        aka_titles=("塞尔玛与路易丝",),
         year=1991,
         directors=("Ridley Scott",),
         actors=("Geena Davis", "Susan Sarandon"),

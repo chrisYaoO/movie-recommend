@@ -114,6 +114,35 @@ class HistoryPersistenceServiceTest(unittest.TestCase):
         self.assertEqual(4.5, history["user_rating"])
         self.assertEqual("updated", history["comment"])
 
+    def test_reimport_same_source_row_with_changed_hash_updates_history(self) -> None:
+        with TemporaryDirectory() as directory:
+            adapter = FakeDoubanDetailAdapter()
+
+            with SQLiteViewingHistoryRepository(Path(directory) / "movies.db") as repository:
+                repository.initialize_schema()
+                with repository.connection:
+                    repository.upsert_movie_detail(_detail("1291992", "Thelma & Louise"))
+
+                first = persist_confirmed_viewing_history(
+                    [_confirmed("1291992", "hash-before", rating=4.0, comment="first")],
+                    adapter,
+                    repository,
+                )
+                second = persist_confirmed_viewing_history(
+                    [_confirmed("1291992", "hash-after", rating=4.5, comment="updated")],
+                    adapter,
+                    repository,
+                )
+
+                history_count = repository.connection.execute("SELECT COUNT(*) FROM viewing_history").fetchone()[0]
+                history = repository.connection.execute("SELECT * FROM viewing_history").fetchone()
+
+        self.assertEqual(first.items[0].viewing_history_id, second.items[0].viewing_history_id)
+        self.assertEqual(1, history_count)
+        self.assertEqual("hash-after", history["source_row_hash"])
+        self.assertEqual(4.5, history["user_rating"])
+        self.assertEqual("updated", history["comment"])
+
 
 def _confirmed(
     subject_id: str,

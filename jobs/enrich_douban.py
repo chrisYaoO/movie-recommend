@@ -10,6 +10,7 @@ from typing import Literal
 from backend.app.db.repository import ViewingHistoryRepository
 from backend.app.db.sqlite_repository import SQLiteViewingHistoryRepository
 from backend.app.services.metadata_service import (
+    DEFAULT_CHROME_BINARY_PATH,
     DoubanDetailAdapter,
     DoubanSeleniumDetailAdapter,
 )
@@ -108,7 +109,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Enrich Douban movie details into the local movies table.")
     parser.add_argument("subject_ids", nargs="+", help="Douban subject IDs to enrich.")
     parser.add_argument("--db-path", default="data/movies.sqlite3")
-    parser.add_argument("--chrome-binary-path", default=None)
+    parser.add_argument("--chrome-binary-path", default=DEFAULT_CHROME_BINARY_PATH)
     parser.add_argument("--timeout-seconds", type=float, default=20.0)
     parser.add_argument("--delay-seconds", type=float, default=1.0)
     args = parser.parse_args()

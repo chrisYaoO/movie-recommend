@@ -120,6 +120,9 @@ class ConfirmedViewingHistoryInput:
 class DoubanMovieDetail:
     subject_id: str
     title: str
+    display_title: str | None = None
+    original_title: str | None = None
+    aka_titles: tuple[str, ...] = ()
     year: int | None = None
     directors: tuple[str, ...] = ()
     actors: tuple[str, ...] = ()

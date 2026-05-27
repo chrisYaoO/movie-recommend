@@ -370,7 +370,7 @@ def run_search_match_job(inputs: list[DoubanMatchInput], adapter: DoubanSearchAd
 
         selected_result = _select_first_year_match(match_input, search_results)
         if selected_result is None:
-            candidates.append(_to_no_match_candidate(match_input, "douban_search_no_year_match"))
+            candidates.append(_to_review_candidate(match_input, search_results[0], reason="douban_search_no_year_match"))
             continue
 
         candidates.append(_to_scored_search_candidate(match_input, selected_result))
@@ -378,19 +378,25 @@ def run_search_match_job(inputs: list[DoubanMatchInput], adapter: DoubanSearchAd
 
 
 def score_search_result(match_input: DoubanMatchInput, search_result: DoubanSearchResult) -> SearchMatchScore:
+    title_matches = normalize_title(match_input.title) == normalize_title(search_result.title)
     year_matches = match_input.release_year is None or search_result.year == match_input.release_year
-    if not year_matches:
-        return SearchMatchScore(
-            status=DoubanMatchStatus.NO_MATCH,
-            score=0.0,
-            reason="year_mismatch",
-        )
-
-    if normalize_title(match_input.title) == normalize_title(search_result.title):
+    if title_matches and year_matches:
         return SearchMatchScore(
             status=DoubanMatchStatus.AUTO_MATCHED,
             score=0.95,
             reason="title_year_exact",
+        )
+    if title_matches:
+        return SearchMatchScore(
+            status=DoubanMatchStatus.AUTO_MATCHED,
+            score=0.9,
+            reason="title_exact_year_differs",
+        )
+    if not year_matches:
+        return SearchMatchScore(
+            status=DoubanMatchStatus.NEEDS_REVIEW,
+            score=0.5,
+            reason="year_mismatch",
         )
 
     return SearchMatchScore(
@@ -445,7 +451,11 @@ def _to_no_match_candidate(match_input: DoubanMatchInput, reason: str = "douban_
     )
 
 
-def _to_review_candidate(match_input: DoubanMatchInput, search_result: DoubanSearchResult) -> DoubanMatchCandidate:
+def _to_review_candidate(
+    match_input: DoubanMatchInput,
+    search_result: DoubanSearchResult,
+    reason: str = "douban_search_candidate",
+) -> DoubanMatchCandidate:
     return DoubanMatchCandidate(
         source_raw_id=match_input.source_raw_id,
         source_file=match_input.source_file,
@@ -453,7 +463,7 @@ def _to_review_candidate(match_input: DoubanMatchInput, search_result: DoubanSea
         query_title=match_input.title,
         status=DoubanMatchStatus.NEEDS_REVIEW,
         match_score=0.0,
-        match_reasons=("douban_search_candidate",),
+        match_reasons=(reason,),
         candidate_subject_id=search_result.subject_id,
         candidate_title=search_result.title,
         candidate_year=search_result.year,
@@ -482,6 +492,16 @@ def _select_first_year_match(
     match_input: DoubanMatchInput,
     search_results: list[DoubanSearchResult],
 ) -> DoubanSearchResult | None:
+    title_matches = [
+        result
+        for result in search_results
+        if normalize_title(result.title) == normalize_title(match_input.title)
+    ]
+    if title_matches:
+        if match_input.release_year is None:
+            return title_matches[0]
+        return next((result for result in title_matches if result.year == match_input.release_year), title_matches[0])
+
     if match_input.release_year is None:
         return search_results[0] if search_results else None
     return next((result for result in search_results if result.year == match_input.release_year), None)
