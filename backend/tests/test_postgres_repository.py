@@ -2,11 +2,23 @@ import os
 import unittest
 from datetime import date
 
+from backend.app.config import load_local_env
 from backend.app.db.postgres_repository import PostgresViewingHistoryRepository
 from backend.app.models.domain import ConfirmedViewingHistoryInput, DoubanMovieDetail
 
 
-@unittest.skipUnless(os.getenv("MOVIES_POSTGRES_DSN"), "MOVIES_POSTGRES_DSN is not configured")
+load_local_env()
+
+
+def _destructive_postgres_tests_enabled() -> bool:
+    dsn = os.getenv("MOVIES_POSTGRES_DSN", "")
+    return os.getenv("MOVIES_ALLOW_DESTRUCTIVE_DB_TESTS") == "1" or dsn.endswith("_test")
+
+
+@unittest.skipUnless(
+    _destructive_postgres_tests_enabled(),
+    "destructive PostgreSQL tests require MOVIES_ALLOW_DESTRUCTIVE_DB_TESTS=1 or a *_test database",
+)
 class PostgresViewingHistoryRepositoryTest(unittest.TestCase):
     def test_persists_and_updates_confirmed_viewing_history(self) -> None:
         dsn = os.environ["MOVIES_POSTGRES_DSN"]
