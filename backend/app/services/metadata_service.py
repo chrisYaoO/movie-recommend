@@ -41,6 +41,7 @@ class DoubanHttpDetailAdapter:
         self.delay_seconds = delay_seconds
         self.user_agent = user_agent
         self.last_request_at = 0.0
+        self._last_page_source: str | None = None
 
     def fetch(self, subject_id: str) -> DoubanMovieDetail:
         self._throttle()
@@ -54,11 +55,16 @@ class DoubanHttpDetailAdapter:
         )
         with urlopen(request, timeout=self.timeout_seconds) as response:
             html = response.read().decode("utf-8", errors="replace")
+        self._last_page_source = html
         self.last_request_at = time.monotonic()
         detail = parse_douban_movie_detail(subject_id, html, url)
         if _is_invalid_detail_title(detail.title):
             raise ValueError("Douban detail page did not contain movie metadata")
         return detail
+
+    @property
+    def last_page_source(self) -> str | None:
+        return self._last_page_source
 
     def _throttle(self) -> None:
         if self.last_request_at <= 0:
@@ -90,6 +96,7 @@ class DoubanSeleniumDetailAdapter:
         self.driver_factory = driver_factory
         self.wait_for_json_ld = wait_for_json_ld
         self.last_request_at = 0.0
+        self._last_page_source: str | None = None
         self.driver = None
 
     def fetch(self, subject_id: str) -> DoubanMovieDetail:
@@ -103,11 +110,16 @@ class DoubanSeleniumDetailAdapter:
             except TimeoutException:
                 pass
         self.last_request_at = time.monotonic()
+        self._last_page_source = driver.page_source
 
         detail = parse_douban_movie_detail(subject_id, driver.page_source, url)
         if _is_invalid_detail_title(detail.title):
             raise ValueError("Douban detail page did not contain movie metadata")
         return detail
+
+    @property
+    def last_page_source(self) -> str | None:
+        return self._last_page_source
 
     def close(self) -> None:
         if self.driver is not None:
@@ -196,7 +208,8 @@ def parse_douban_movie_detail(subject_id: str, html: str, url: str | None = None
 def _is_invalid_detail_title(title: str | None) -> bool:
     if not title:
         return True
-    return title.strip() in {"璞嗙摚", "豆瓣", "떴곌"}
+    stripped = title.strip()
+    return stripped in {"璞嗙摚", "豆瓣", "떴곌", "??"} or bool(stripped) and set(stripped) == {"?"}
 
 
 def _extract_json_ld_detail(html: str) -> dict:

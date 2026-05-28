@@ -240,7 +240,7 @@ class MetadataServiceTest(unittest.TestCase):
                 adapter.fetch("1291556")
 
     def test_detail_adapter_rejects_mojibake_generic_douban_title(self) -> None:
-        html = "<html><head><title>떴곌</title></head><body></body></html>"
+        html = "<html><head><title>??</title></head><body></body></html>"
 
         with patch("backend.app.services.metadata_service.urlopen", return_value=_FakeHttpResponse(html)):
             with self.assertRaisesRegex(ValueError, "did not contain movie metadata"):
@@ -248,3 +248,5 @@ class MetadataServiceTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+

@@ -1,4 +1,4 @@
-import json
+﻿import json
 from contextlib import redirect_stdout
 from io import StringIO
 import unittest
@@ -40,12 +40,12 @@ class ReviewMatchedHistoryJobTest(unittest.TestCase):
                     {
                         "items": [
                             _review_item(
-                                source_row_hash=candidates[0].source_row_hash,
+                                source_row_checksum=candidates[0].source_row_checksum,
                                 source_row_number=2,
                                 candidate_subject_id="subject-confirm",
                             ),
                             _review_item(
-                                source_row_hash=candidates[1].source_row_hash,
+                                source_row_checksum=candidates[1].source_row_checksum,
                                 source_row_number=3,
                                 candidate_subject_id="subject-reject",
                             ),
@@ -107,12 +107,12 @@ class ReviewMatchedHistoryJobTest(unittest.TestCase):
                     {
                         "items": [
                             _review_item(
-                                source_row_hash=candidates[0].source_row_hash,
+                                source_row_checksum=candidates[0].source_row_checksum,
                                 source_row_number=2,
                                 candidate_subject_id="subject-confirm",
                             ),
                             _review_item(
-                                source_row_hash=candidates[1].source_row_hash,
+                                source_row_checksum=candidates[1].source_row_checksum,
                                 source_row_number=3,
                                 candidate_subject_id="subject-reject",
                             ),
@@ -162,12 +162,12 @@ class ReviewMatchedHistoryJobTest(unittest.TestCase):
                         "items": [
                             {
                                 **_review_item(
-                                    source_row_hash="stale-hash",
+                                    source_row_checksum="stale-hash",
                                     source_row_number=2,
                                     candidate_subject_id="subject-confirm",
                                 ),
                                 "review_status": "failed",
-                                "review_error": "source row hash not found in Excel import",
+                                "review_error": "Source row checksum not found in Excel import",
                             }
                         ]
                     }
@@ -192,7 +192,7 @@ class ReviewMatchedHistoryJobTest(unittest.TestCase):
 
         self.assertEqual(1, result.confirmed_count)
         self.assertEqual(REVIEW_CONFIRMED_STATUS, progress["items"][0]["status"])
-        self.assertEqual(candidates[0].source_row_hash, progress["items"][0]["source_row_hash"])
+        self.assertEqual(candidates[0].source_row_checksum, progress["items"][0]["source_row_checksum"])
         self.assertNotIn("review_status", progress["items"][0])
         self.assertNotIn("review_error", progress["items"][0])
 
@@ -211,15 +211,15 @@ class ReviewMatchedHistoryJobTest(unittest.TestCase):
                         "items": [
                             {
                                 **_review_item(
-                                    source_row_hash="stale-hash",
+                                    source_row_checksum="stale-hash",
                                     source_row_number=99,
                                     candidate_subject_id="subject-confirm",
                                 ),
-                                "source_file": "MOVIES.xlsx#OldSheet",
+                                "source_sheet_name": "OldSheet",
                                 "title": "Excel Confirm",
                                 "release_year": 2026,
                                 "review_status": "failed",
-                                "review_error": "source row hash not found in Excel import",
+                                "review_error": "Source row checksum not found in Excel import",
                             }
                         ]
                     }
@@ -243,8 +243,8 @@ class ReviewMatchedHistoryJobTest(unittest.TestCase):
             progress = json.loads(state_path.read_text(encoding="utf-8"))
 
         self.assertEqual(1, result.confirmed_count)
-        self.assertEqual(candidates[0].source_row_hash, progress["items"][0]["source_row_hash"])
-        self.assertEqual("MOVIES.xlsx#2026", progress["items"][0]["source_file"])
+        self.assertEqual(candidates[0].source_row_checksum, progress["items"][0]["source_row_checksum"])
+        self.assertEqual("2026", progress["items"][0]["source_sheet_name"])
         self.assertEqual(2, progress["items"][0]["source_row_number"])
         self.assertEqual(REVIEW_CONFIRMED_STATUS, progress["items"][0]["status"])
 
@@ -263,7 +263,7 @@ class ReviewMatchedHistoryJobTest(unittest.TestCase):
                         "items": [
                             {
                                 **_review_item(
-                                    source_row_hash=candidates[0].source_row_hash,
+                                    source_row_checksum=candidates[0].source_row_checksum,
                                     source_row_number=2,
                                     candidate_subject_id="subject-confirm",
                                 ),
@@ -273,7 +273,7 @@ class ReviewMatchedHistoryJobTest(unittest.TestCase):
                                 "persisted_title": "Confirmed Title",
                             },
                             _review_item(
-                                source_row_hash=candidates[0].source_row_hash,
+                                source_row_checksum=candidates[0].source_row_checksum,
                                 source_row_number=2,
                                 candidate_subject_id="subject-confirm",
                             ),
@@ -303,7 +303,7 @@ class ReviewMatchedHistoryJobTest(unittest.TestCase):
         self.assertEqual(0, history_count)
         self.assertEqual(REVIEW_CONFIRMED_STATUS, progress["items"][1]["status"])
         self.assertEqual("history-1", progress["items"][1]["viewing_history_id"])
-        self.assertEqual(candidates[0].source_row_hash, progress["items"][1]["duplicate_of_source_row_hash"])
+        self.assertEqual(candidates[0].source_row_checksum, progress["items"][1]["duplicate_of_source_row_checksum"])
         self.assertEqual([], detail_adapter.fetches)
 
     def test_skips_duplicate_pending_row_in_same_persistence_batch(self) -> None:
@@ -320,12 +320,12 @@ class ReviewMatchedHistoryJobTest(unittest.TestCase):
                     {
                         "items": [
                             _review_item(
-                                source_row_hash=candidates[0].source_row_hash,
+                                source_row_checksum=candidates[0].source_row_checksum,
                                 source_row_number=2,
                                 candidate_subject_id="subject-confirm",
                             ),
                             _review_item(
-                                source_row_hash=candidates[0].source_row_hash,
+                                source_row_checksum=candidates[0].source_row_checksum,
                                 source_row_number=2,
                                 candidate_subject_id="subject-confirm",
                             ),
@@ -357,7 +357,7 @@ class ReviewMatchedHistoryJobTest(unittest.TestCase):
         self.assertEqual(REVIEW_CONFIRMED_STATUS, progress["items"][0]["status"])
         self.assertEqual(REVIEW_CONFIRMED_STATUS, progress["items"][1]["status"])
         self.assertEqual(progress["items"][0]["viewing_history_id"], progress["items"][1]["viewing_history_id"])
-        self.assertEqual(candidates[0].source_row_hash, progress["items"][1]["duplicate_of_source_row_hash"])
+        self.assertEqual(candidates[0].source_row_checksum, progress["items"][1]["duplicate_of_source_row_checksum"])
 
     def test_resolves_rejected_and_no_match_rows_by_manual_subject_id(self) -> None:
         with TemporaryDirectory() as directory:
@@ -374,7 +374,7 @@ class ReviewMatchedHistoryJobTest(unittest.TestCase):
                         "items": [
                             {
                                 **_review_item(
-                                    source_row_hash=candidates[0].source_row_hash,
+                                    source_row_checksum=candidates[0].source_row_checksum,
                                     source_row_number=2,
                                     candidate_subject_id="",
                                 ),
@@ -384,7 +384,7 @@ class ReviewMatchedHistoryJobTest(unittest.TestCase):
                             },
                             {
                                 **_review_item(
-                                    source_row_hash=candidates[1].source_row_hash,
+                                    source_row_checksum=candidates[1].source_row_checksum,
                                     source_row_number=3,
                                     candidate_subject_id="subject-rejected",
                                 ),
@@ -444,7 +444,7 @@ class ReviewMatchedHistoryJobTest(unittest.TestCase):
                         "items": [
                             {
                                 **_review_item(
-                                    source_row_hash=candidates[0].source_row_hash,
+                                    source_row_checksum=candidates[0].source_row_checksum,
                                     source_row_number=2,
                                     candidate_subject_id="",
                                 ),
@@ -503,7 +503,7 @@ class ReviewMatchedHistoryJobTest(unittest.TestCase):
                         "items": [
                             {
                                 **_review_item(
-                                    source_row_hash=candidates[0].source_row_hash,
+                                    source_row_checksum=candidates[0].source_row_checksum,
                                     source_row_number=2,
                                     candidate_subject_id="",
                                 ),
@@ -514,7 +514,7 @@ class ReviewMatchedHistoryJobTest(unittest.TestCase):
                             },
                             {
                                 **_review_item(
-                                    source_row_hash=candidates[1].source_row_hash,
+                                    source_row_checksum=candidates[1].source_row_checksum,
                                     source_row_number=3,
                                     candidate_subject_id="subject-rejected",
                                 ),
@@ -599,11 +599,11 @@ def _write_workbook(path: Path) -> None:
     workbook.save(path)
 
 
-def _review_item(source_row_hash: str, source_row_number: int, candidate_subject_id: str) -> dict:
+def _review_item(source_row_checksum: str, source_row_number: int, candidate_subject_id: str) -> dict:
     return {
-        "source_row_hash": source_row_hash,
+        "source_row_checksum": source_row_checksum,
         "source_raw_id": f"raw-{source_row_number}",
-        "source_file": "MOVIES.xlsx#2026",
+        "source_sheet_name": "2026",
         "source_row_number": source_row_number,
         "title": f"Excel {source_row_number}",
         "release_year": 2026,
@@ -632,3 +632,5 @@ def _detail(subject_id: str, title: str) -> DoubanMovieDetail:
 
 if __name__ == "__main__":
     unittest.main()
+
+

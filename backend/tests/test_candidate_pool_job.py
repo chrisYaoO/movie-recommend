@@ -1,4 +1,4 @@
-import unittest
+﻿import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
@@ -42,14 +42,14 @@ class CandidatePoolJobTest(unittest.TestCase):
         )
 
     def test_process_queue_enriches_movie_activates_pool_and_queues_one_layer_recommendations(self) -> None:
-        html = _recommendations_html("电影", ("1292720", "1292064"))
+        html = _recommendations_html("鐢靛奖", ("1292720", "1292064"))
 
         with TemporaryDirectory() as directory:
             with SQLiteViewingHistoryRepository(Path(directory) / "movies.db") as repository:
                 repository.initialize_schema()
                 repository.upsert_candidate_subject("1292052", DOUBAN_TOP250_SOURCE, "top1")
                 adapter = _FakeDetailPageAdapter(
-                    {"1292052": _detail("1292052", "肖申克的救赎 The Shawshank Redemption")},
+                    {"1292052": _detail("1292052", "鑲栫敵鍏嬬殑鏁戣祹 The Shawshank Redemption")},
                     {"1292052": html},
                 )
 
@@ -77,7 +77,7 @@ class CandidatePoolJobTest(unittest.TestCase):
                 DOUBAN_RECOMMENDATION_SOURCE,
                 "recommended_from:1292052",
                 "1292052",
-                "recommended from 肖申克的救赎 The Shawshank Redemption",
+                "recommended from 鑲栫敵鍏嬬殑鏁戣祹 The Shawshank Redemption",
                 "pending",
             ),
             [tuple(row) for row in queue_rows],
@@ -133,18 +133,19 @@ class CandidatePoolJobTest(unittest.TestCase):
                 repository.upsert_candidate_subject("1292052", DOUBAN_TOP250_SOURCE, "top1")
                 adapter = _FakeDetailPageAdapter(
                     {"1292052": _detail("1292052", "The Shawshank Redemption")},
-                    {"1292052": ""},
+                    {"1292052": _recommendations_html("鐢靛奖", ("1292720", "1292064"))},
                 )
 
                 process_candidate_queue(repository, adapter, status_writer=messages.append)
 
         self.assertIn("[queue] status=pending, remaining=1, selected=1, limit=None", messages)
+        self.assertIn("[recommendation] discovered=2, inserted=2", messages)
         self.assertTrue(any("subject=1292052" in message for message in messages))
-        self.assertTrue(any("remaining_pending=0" in message for message in messages))
+        self.assertTrue(any("remaining_pending=2" in message for message in messages))
         self.assertTrue(any(message.startswith("[summary] attempted=1") for message in messages))
 
     def test_discovers_recommendations_from_watched_movies_into_queue_only(self) -> None:
-        html = _recommendations_html("电影", ("1292720", "1292064"))
+        html = _recommendations_html("鐢靛奖", ("1292720", "1292064"))
 
         with TemporaryDirectory() as directory:
             with SQLiteViewingHistoryRepository(Path(directory) / "movies.db") as repository:
@@ -196,7 +197,7 @@ class CandidatePoolJobTest(unittest.TestCase):
         )
 
     def test_discover_history_recommendations_writes_remaining_progress(self) -> None:
-        html = _recommendations_html("电影", ("1292720",))
+        html = _recommendations_html("鐢靛奖", ("1292720",))
         messages: list[str] = []
 
         with TemporaryDirectory() as directory:
@@ -219,7 +220,7 @@ class CandidatePoolJobTest(unittest.TestCase):
         self.assertTrue(any(message.startswith("[summary] attempted=1") for message in messages))
 
     def test_discover_history_recommendations_resumes_unprocessed_watched_movies(self) -> None:
-        html = _recommendations_html("电影", ("1292720",))
+        html = _recommendations_html("鐢靛奖", ("1292720",))
 
         with TemporaryDirectory() as directory:
             with SQLiteViewingHistoryRepository(Path(directory) / "movies.db") as repository:
@@ -264,14 +265,14 @@ class CandidatePoolJobTest(unittest.TestCase):
     def test_parse_recommended_subject_ids_uses_recommendation_section_only(self) -> None:
         html = f"""
         <a href="https://movie.douban.com/subject/1111111/">outside</a>
-        {_recommendations_html("电影", ("1292720", "1292052", "1292720", "1292064"))}
+        {_recommendations_html("鐢靛奖", ("1292720", "1292052", "1292720", "1292064"))}
         <a href="https://movie.douban.com/subject/2222222/">outside</a>
         """
 
         self.assertEqual(["1292720", "1292064"], parse_recommended_subject_ids(html, "1292052"))
 
     def test_parse_recommended_subject_ids_accepts_series_recommendation_section(self) -> None:
-        html = _recommendations_html("剧集", ("35465232", "35600000"))
+        html = _recommendations_html("鍓ч泦", ("35465232", "35600000"))
 
         self.assertEqual(["35465232", "35600000"], parse_recommended_subject_ids(html, "1292052"))
 
@@ -310,7 +311,7 @@ def _recommendations_html(kind: str, subject_ids: tuple[str, ...]) -> str:
     )
     return f"""
     <div id="recommendations">
-      <h2><i>喜欢这部{kind}的人也喜欢 · · · · · ·</i></h2>
+      <h2><i>鍠滄杩欓儴{kind}鐨勪汉涔熷枩娆?路 路 路 路 路 路</i></h2>
       <div class="recommendations-bd">
         <dl>
           {links}
@@ -327,12 +328,12 @@ def _confirmed(subject_id: str, source_row_number: int = 8):
 
     return ConfirmedViewingHistoryInput(
         source_raw_id=f"raw-{subject_id}",
-        source_file="MOVIES.xlsx#2026",
+        source_sheet_name="MOVIES.xlsx#2026",
         source_row_number=source_row_number,
         douban_subject_id=subject_id,
         watched_date=date(2026, 3, 19),
         user_rating=4.2,
-        source_row_hash=f"hash-{subject_id}",
+        source_row_checksum=f"checksum-{subject_id}",
         quality="1080p",
         comment="watched",
     )
@@ -355,3 +356,5 @@ def _detail(subject_id: str, title: str) -> DoubanMovieDetail:
 
 if __name__ == "__main__":
     unittest.main()
+
+

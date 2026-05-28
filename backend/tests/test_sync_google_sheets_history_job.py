@@ -1,17 +1,20 @@
-import os
+﻿import os
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import Mock, patch
 
+from backend.app.db.sqlite_repository import SQLiteViewingHistoryRepository
 from backend.app.services.import_service import InMemoryViewingHistoryRawRepository, ViewingHistoryImportService
 from jobs.sync_google_sheets_history import (
     DEFAULT_DETAIL_ADAPTER,
-    DEFAULT_SOURCE_FILE_ALIAS,
+    DEFAULT_SOURCE_NAME,
     GOOGLE_SHEETS_SCOPE,
     GoogleSheetsValuesClient,
+    _confirmed_subject_ids,
     _range_name,
     read_google_sheet_rows,
+    replay_confirmed_progress_rows,
     resolve_config_value,
     resolve_service_account_file,
     resolve_spreadsheet_id,
@@ -38,7 +41,7 @@ class SyncGoogleSheetsHistoryJobTest(unittest.TestCase):
         self.assertEqual(1, result.imported_count)
         self.assertEqual(1, result.skipped_invalid_count)
         imported = result.rows[0]
-        self.assertEqual("MOVIES.xlsx#2026", imported.source_file)
+        self.assertEqual("2026", imported.source_sheet_name)
         self.assertEqual(2, imported.source_row_number)
         self.assertEqual("Yi Yi", imported.name_raw)
         self.assertEqual("5.0", imported.rating_raw)
@@ -140,12 +143,161 @@ class SyncGoogleSheetsHistoryJobTest(unittest.TestCase):
         self.assertEqual("Bearer token", request.headers["Authorization"])
         self.assertNotIn("ignored-api-key", request.full_url)
 
+    def test_reads_sheet_names_from_spreadsheet_metadata(self) -> None:
+        response = Mock()
+        response.__enter__ = Mock(return_value=response)
+        response.__exit__ = Mock(return_value=None)
+        response.read.return_value = b'{"sheets": [{"properties": {"title": "2025"}}, {"properties": {"title": "2026"}}]}'
+
+        with patch("jobs.sync_google_sheets_history._service_account_access_token", return_value="token"), patch(
+            "jobs.sync_google_sheets_history.urlopen", return_value=response
+        ) as opened:
+            client = GoogleSheetsValuesClient(
+                spreadsheet_id="spreadsheet",
+                api_key="ignored-api-key",
+                service_account_file="movie-491021-1cd922995007.json",
+            )
+
+            names = client.sheet_names()
+
+        request = opened.call_args.args[0]
+        self.assertEqual(["2025", "2026"], names)
+        self.assertIn("fields=sheets.properties.title", request.full_url)
+        self.assertNotIn("ignored-api-key", request.full_url)
+
     def test_service_account_scope_allows_future_sheet_writes(self) -> None:
         self.assertEqual("https://www.googleapis.com/auth/spreadsheets", GOOGLE_SHEETS_SCOPE)
 
     def test_sync_defaults_keep_common_command_short(self) -> None:
-        self.assertEqual("MOVIES.xlsx", DEFAULT_SOURCE_FILE_ALIAS)
+        self.assertEqual("google-sheets", DEFAULT_SOURCE_NAME)
         self.assertEqual("http", DEFAULT_DETAIL_ADAPTER)
+
+    def test_confirmed_progress_uses_legacy_source_file_sheet_name(self) -> None:
+        by_source_row, by_checksum, conflicts = _confirmed_subject_ids(
+            [
+                {
+                    "source_file": "MOVIES.xlsx#2026",
+                    "source_row_number": 2,
+                    "source_row_hash": "old-checksum",
+                    "candidate_subject_id": "1291561",
+                    "status": "review_confirmed_persisted",
+                }
+            ]
+        )
+
+        self.assertEqual({("2026", 2): "1291561"}, by_source_row)
+        self.assertEqual({"old-checksum": "1291561"}, by_checksum)
+        self.assertEqual((), conflicts)
+
+    def test_confirmed_progress_uses_explicit_status_priority(self) -> None:
+        by_source_row, _, conflicts = _confirmed_subject_ids(
+            [
+                {
+                    "source_sheet_name": "2026",
+                    "source_row_number": 2,
+                    "candidate_subject_id": "auto-id",
+                    "status": "auto_matched_persisted",
+                },
+                {
+                    "source_sheet_name": "2026",
+                    "source_row_number": 2,
+                    "candidate_subject_id": "review-id",
+                    "status": "review_confirmed_persisted",
+                },
+                {
+                    "source_sheet_name": "2026",
+                    "source_row_number": 2,
+                    "manual_id_subject_id": "manual-id",
+                    "candidate_subject_id": "candidate-id",
+                    "status": "manual_id_persisted",
+                },
+            ]
+        )
+
+        self.assertEqual({("2026", 2): "manual-id"}, by_source_row)
+        self.assertEqual((), conflicts)
+
+    def test_confirmed_progress_reports_same_priority_subject_conflict(self) -> None:
+        by_source_row, _, conflicts = _confirmed_subject_ids(
+            [
+                {
+                    "source_sheet_name": "2026",
+                    "source_row_number": 2,
+                    "manual_id_subject_id": "manual-1",
+                    "status": "manual_id_persisted",
+                },
+                {
+                    "source_sheet_name": "2026",
+                    "source_row_number": 2,
+                    "manual_id_subject_id": "manual-2",
+                    "status": "manual_id_persisted",
+                },
+                {
+                    "source_sheet_name": "2026",
+                    "source_row_number": 3,
+                    "candidate_subject_id": "review-id",
+                    "status": "review_confirmed_persisted",
+                },
+            ]
+        )
+
+        self.assertEqual({("2026", 3): "review-id"}, by_source_row)
+        self.assertEqual(1, len(conflicts))
+        self.assertEqual("2026", conflicts[0].source_sheet_name)
+        self.assertEqual(2, conflicts[0].source_row_number)
+        self.assertEqual("manual_id_persisted", conflicts[0].status)
+        self.assertEqual(("manual-1", "manual-2"), conflicts[0].subject_ids)
+
+    def test_replays_confirmed_progress_rows_without_fetching_movie_details(self) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            progress_path = root / "progress.json"
+            progress_path.write_text(
+                """{
+                  "items": [
+                    {
+                      "source_file": "MOVIES.xlsx#2026",
+                      "source_row_number": 2,
+                      "candidate_subject_id": "1291561",
+                      "status": "review_confirmed_persisted"
+                    }
+                  ]
+                }""",
+                encoding="utf-8",
+            )
+            rows = [
+                {
+                    "__source_sheet": "2026",
+                    "__source_row_number": 2,
+                    "Date": "2026-05-12",
+                    "Name": "Yi Yi",
+                    "Director": "Edward Yang",
+                    "Year": 2000,
+                    "Rating": 5.0,
+                    "Quality": "1080p",
+                    "Comment": "favorite",
+                }
+            ]
+            with SQLiteViewingHistoryRepository(root / "movies.db") as repository:
+                repository.initialize_schema()
+                summary = replay_confirmed_progress_rows(
+                    source_name="google-sheets",
+                    rows=rows,
+                    progress_path=progress_path,
+                    repository=repository,
+                )
+                movie_count = repository.connection.execute("SELECT COUNT(*) FROM movies").fetchone()[0]
+                history = repository.connection.execute(
+                    "SELECT source_sheet_name, source_row_number, douban_subject_id, movie_id FROM viewing_history"
+                ).fetchone()
+
+        self.assertEqual(1, summary.matched_confirmed_count)
+        self.assertEqual(1, summary.persisted_count)
+        self.assertEqual(0, summary.confirmed_conflict_count)
+        self.assertEqual(0, summary.fetched_count)
+        self.assertEqual(0, summary.recommendation_inserted_count)
+        self.assertEqual(0, movie_count)
+        self.assertEqual(("2026", 2, "1291561", None), tuple(history))
 
 
 class _FakeSheetsClient:
@@ -157,6 +309,11 @@ class _FakeSheetsClient:
         self.ranges.append(range_name)
         return self.values_by_range[range_name]
 
+    def sheet_names(self):
+        return ["2026"]
+
 
 if __name__ == "__main__":
     unittest.main()
+
+

@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import argparse
 from dataclasses import asdict, dataclass
@@ -106,21 +106,21 @@ class RetryNoYearMatchSummary:
 
 @dataclass(frozen=True)
 class CompletedResumeItems:
-    hashes: set[str]
+    checksums: set[str]
     source_rows: set[tuple[str, int]]
 
     def contains(self, candidate) -> bool:
-        if candidate.source_row_hash in self.hashes:
+        if candidate.source_row_checksum in self.checksums:
             return True
-        return (candidate.source_file, candidate.source_row_number) in self.source_rows
+        return (candidate.source_sheet_name, candidate.source_row_number) in self.source_rows
 
     def add(self, candidate) -> None:
-        if candidate.source_row_hash:
-            self.hashes.add(candidate.source_row_hash)
-        self.source_rows.add((candidate.source_file, candidate.source_row_number))
+        if candidate.source_row_checksum:
+            self.checksums.add(candidate.source_row_checksum)
+        self.source_rows.add((candidate.source_sheet_name, candidate.source_row_number))
 
     def __len__(self) -> int:
-        return len(self.hashes)
+        return len(self.checksums)
 
 
 def import_auto_matched_history(
@@ -134,7 +134,7 @@ def import_auto_matched_history(
 ) -> AutoImportRunResult:
     excel_path = Path(excel_path)
     return import_auto_matched_rows(
-        source_file=excel_path.name,
+        source_sheet_name=excel_path.name,
         rows=read_viewing_history_excel(excel_path),
         search_adapter=search_adapter,
         detail_adapter=detail_adapter,
@@ -146,7 +146,7 @@ def import_auto_matched_history(
 
 
 def import_auto_matched_rows(
-    source_file: str,
+    source_sheet_name: str,
     rows: list[dict[str, Any]],
     search_adapter: DoubanSearchAdapter,
     detail_adapter: DoubanDetailAdapter,
@@ -156,7 +156,7 @@ def import_auto_matched_rows(
     status_writer: StatusWriter | None = None,
 ) -> AutoImportRunResult:
     import_service = ViewingHistoryImportService(InMemoryViewingHistoryRawRepository())
-    import_result = import_service.import_rows(source_file, rows)
+    import_result = import_service.import_rows(source_sheet_name, rows)
     mapping = import_service.to_viewing_history_candidates()
     candidates = mapping.candidates
     subject_id_candidates = [candidate for candidate in candidates if candidate.douban_subject_id]
@@ -194,7 +194,7 @@ def import_auto_matched_rows(
     )
 
     metadata_result = import_metadata_auto_matches_from_rows_resumable(
-        source_file=source_file,
+        source_sheet_name=source_sheet_name,
         rows=rows,
         search_adapter=search_adapter,
         detail_adapter=detail_adapter,
@@ -239,7 +239,7 @@ def import_metadata_auto_matches_resumable(
 ) -> ResumableAutoMatchRunResult:
     excel_path = Path(excel_path)
     return import_metadata_auto_matches_from_rows_resumable(
-        source_file=excel_path.name,
+        source_sheet_name=excel_path.name,
         rows=read_viewing_history_excel(excel_path),
         search_adapter=search_adapter,
         detail_adapter=detail_adapter,
@@ -251,7 +251,7 @@ def import_metadata_auto_matches_resumable(
 
 
 def import_metadata_auto_matches_from_rows_resumable(
-    source_file: str,
+    source_sheet_name: str,
     rows: list[dict[str, Any]],
     search_adapter: DoubanSearchAdapter,
     detail_adapter: DoubanDetailAdapter,
@@ -261,7 +261,7 @@ def import_metadata_auto_matches_from_rows_resumable(
     status_writer: StatusWriter | None = None,
 ) -> ResumableAutoMatchRunResult:
     import_service = ViewingHistoryImportService(InMemoryViewingHistoryRawRepository())
-    import_service.import_rows(source_file, rows)
+    import_service.import_rows(source_sheet_name, rows)
     mapping = import_service.to_viewing_history_candidates()
     candidates = [candidate for candidate in mapping.candidates if not candidate.douban_subject_id]
     metadata_inputs = build_douban_match_inputs(candidates).inputs
@@ -309,9 +309,9 @@ def import_metadata_auto_matches_from_rows_resumable(
                 f"[match] status = {match.status.value}, score = {match.match_score}",
             )
             entry: dict[str, Any] = {
-                "source_row_hash": candidate.source_row_hash,
+                "source_row_checksum": candidate.source_row_checksum,
                 "source_raw_id": candidate.source_raw_id,
-                "source_file": candidate.source_file,
+                "source_sheet_name": candidate.source_sheet_name,
                 "source_row_number": candidate.source_row_number,
                 "title": candidate.title,
                 "release_year": candidate.release_year,
@@ -378,9 +378,9 @@ def import_metadata_auto_matches_from_rows_resumable(
                 _record_resume_entry(
                     state,
                     {
-                        "source_row_hash": candidate.source_row_hash,
+                        "source_row_checksum": candidate.source_row_checksum,
                         "source_raw_id": candidate.source_raw_id,
-                        "source_file": candidate.source_file,
+                        "source_sheet_name": candidate.source_sheet_name,
                         "source_row_number": candidate.source_row_number,
                         "title": candidate.title,
                         "release_year": candidate.release_year,
@@ -442,13 +442,13 @@ def retry_no_year_match_no_matches(
     import_service = ViewingHistoryImportService(InMemoryViewingHistoryRawRepository())
     import_service.import_excel(excel_path)
     mapping = import_service.to_viewing_history_candidates()
-    candidates_by_hash = {
-        candidate.source_row_hash: candidate
+    candidates_by_checksum = {
+        candidate.source_row_checksum: candidate
         for candidate in mapping.candidates
-        if candidate.source_row_hash is not None
+        if candidate.source_row_checksum is not None
     }
     candidates_by_source_row = {
-        (candidate.source_file, candidate.source_row_number): candidate
+        (candidate.source_sheet_name, candidate.source_row_number): candidate
         for candidate in mapping.candidates
     }
     candidates_by_title_year: dict[tuple[str, int | None], Any] = {}
@@ -467,7 +467,7 @@ def retry_no_year_match_no_matches(
         for item in state.get("items", [])
         if item.get("status") == "no_match"
         and "douban_search_no_year_match" in (item.get("match_reasons") or [])
-        and item.get("source_row_hash")
+        and _progress_row_checksum(item)
     ]
 
     attempted_count = 0
@@ -480,7 +480,7 @@ def retry_no_year_match_no_matches(
 
         candidate = _resolve_candidate_for_resume_item(
             item,
-            candidates_by_hash,
+            candidates_by_checksum,
             candidates_by_source_row,
             candidates_by_title_year,
         )
@@ -500,9 +500,9 @@ def retry_no_year_match_no_matches(
         match = run_search_match_job([match_input], search_adapter).candidates[0]
         item.update(
             {
-                "source_row_hash": candidate.source_row_hash,
+                "source_row_checksum": candidate.source_row_checksum,
                 "source_raw_id": candidate.source_raw_id,
-                "source_file": candidate.source_file,
+                "source_sheet_name": candidate.source_sheet_name,
                 "source_row_number": candidate.source_row_number,
                 "title": candidate.title,
                 "release_year": candidate.release_year,
@@ -544,20 +544,20 @@ def retry_no_year_match_no_matches(
 
 def _resolve_candidate_for_resume_item(
     item: dict[str, Any],
-    candidates_by_hash: dict[str, Any],
+    candidates_by_checksum: dict[str, Any],
     candidates_by_source_row: dict[tuple[str, int], Any],
     candidates_by_title_year: dict[tuple[str, int | None], Any],
 ):
-    source_row_hash = item.get("source_row_hash")
-    if source_row_hash:
-        candidate = candidates_by_hash.get(source_row_hash)
+    source_row_checksum = _progress_row_checksum(item)
+    if source_row_checksum:
+        candidate = candidates_by_checksum.get(source_row_checksum)
         if candidate is not None:
             return candidate
 
-    source_file = item.get("source_file")
+    source_sheet_name = _progress_source_sheet_name(item)
     source_row_number = item.get("source_row_number")
-    if source_file and isinstance(source_row_number, int):
-        candidate = candidates_by_source_row.get((source_file, source_row_number))
+    if source_sheet_name and isinstance(source_row_number, int):
+        candidate = candidates_by_source_row.get((source_sheet_name, source_row_number))
         if candidate is not None:
             return candidate
 
@@ -691,8 +691,12 @@ def _replace_with_retries(temp_path: Path, target_path: Path, attempts: int = 5,
             time.sleep(delay_seconds)
 
 
+def _completed_checksums(state: dict[str, Any]) -> set[str]:
+    return _completed_resume_items(state).checksums
+
+
 def _completed_hashes(state: dict[str, Any]) -> set[str]:
-    return _completed_resume_items(state).hashes
+    return _completed_checksums(state)
 
 
 def _completed_resume_items(state: dict[str, Any]) -> CompletedResumeItems:
@@ -705,19 +709,36 @@ def _completed_resume_items(state: dict[str, Any]) -> CompletedResumeItems:
         "manual_id_persisted",
         "manual_id_rejected",
     }
-    hashes: set[str] = set()
+    checksums: set[str] = set()
     source_rows: set[tuple[str, int]] = set()
     for item in state.get("items", []):
         if item.get("status") not in completed_statuses:
             continue
-        source_row_hash = item.get("source_row_hash")
-        if source_row_hash:
-            hashes.add(source_row_hash)
-        source_file = item.get("source_file")
+        source_row_checksum = _progress_row_checksum(item)
+        if source_row_checksum:
+            checksums.add(source_row_checksum)
+        source_sheet_name = _progress_source_sheet_name(item)
         source_row_number = item.get("source_row_number")
-        if source_file and isinstance(source_row_number, int):
-            source_rows.add((source_file, source_row_number))
-    return CompletedResumeItems(hashes=hashes, source_rows=source_rows)
+        if source_sheet_name and isinstance(source_row_number, int):
+            source_rows.add((source_sheet_name, source_row_number))
+    return CompletedResumeItems(checksums=checksums, source_rows=source_rows)
+
+
+def _progress_row_checksum(item: dict[str, Any]) -> str | None:
+    return item.get("source_row_checksum") or item.get("source_row_hash")
+
+
+def _progress_source_sheet_name(item: dict[str, Any]) -> str | None:
+    source_sheet_name = item.get("source_sheet_name")
+    if source_sheet_name:
+        return str(source_sheet_name)
+    old_source_file = item.get("source_file")
+    if not old_source_file:
+        return None
+    source_text = str(old_source_file)
+    if "#" in source_text:
+        return source_text.rsplit("#", 1)[1]
+    return source_text
 
 
 def _next_unfinished_index(candidates, completed_items: CompletedResumeItems) -> int | None:
@@ -850,3 +871,5 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
+

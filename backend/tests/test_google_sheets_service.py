@@ -1,4 +1,4 @@
-import unittest
+﻿import unittest
 
 from backend.app.services.google_sheets_service import _row_number_from_updated_range
 
@@ -15,3 +15,5 @@ class GoogleSheetsServiceTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+

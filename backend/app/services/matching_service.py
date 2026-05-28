@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from dataclasses import dataclass
 from dataclasses import replace
@@ -254,7 +254,7 @@ def build_douban_match_inputs(candidates: list[ViewingHistoryCandidate]) -> Matc
     inputs = [
         DoubanMatchInput(
             source_raw_id=candidate.source_raw_id,
-            source_file=candidate.source_file,
+            source_sheet_name=candidate.source_sheet_name,
             source_row_number=candidate.source_row_number,
             title=candidate.title,
             strategy=SUBJECT_ID_STRATEGY if candidate.douban_subject_id else METADATA_STRATEGY,
@@ -300,12 +300,12 @@ def _build_viewing_history_inputs(
         inputs.append(
             ConfirmedViewingHistoryInput(
                 source_raw_id=candidate.source_raw_id,
-                source_file=candidate.source_file,
+                source_sheet_name=candidate.source_sheet_name,
                 source_row_number=candidate.source_row_number,
                 douban_subject_id=match.candidate_subject_id,
                 watched_date=candidate.watched_date,
                 user_rating=candidate.user_rating,
-                source_row_hash=candidate.source_row_hash,
+                source_row_checksum=candidate.source_row_checksum,
                 quality=candidate.quality,
                 comment=candidate.comment,
             )
@@ -410,7 +410,7 @@ def _to_match_candidate(match_input: DoubanMatchInput) -> DoubanMatchCandidate:
     if match_input.douban_subject_id:
         return DoubanMatchCandidate(
             source_raw_id=match_input.source_raw_id,
-            source_file=match_input.source_file,
+            source_sheet_name=match_input.source_sheet_name,
             source_row_number=match_input.source_row_number,
             query_title=match_input.title,
             status=DoubanMatchStatus.AUTO_MATCHED,
@@ -424,7 +424,7 @@ def _to_match_candidate(match_input: DoubanMatchInput) -> DoubanMatchCandidate:
 
     return DoubanMatchCandidate(
         source_raw_id=match_input.source_raw_id,
-        source_file=match_input.source_file,
+        source_sheet_name=match_input.source_sheet_name,
         source_row_number=match_input.source_row_number,
         query_title=match_input.title,
         status=DoubanMatchStatus.NEEDS_REVIEW,
@@ -439,7 +439,7 @@ def _to_match_candidate(match_input: DoubanMatchInput) -> DoubanMatchCandidate:
 def _to_no_match_candidate(match_input: DoubanMatchInput, reason: str = "douban_search_no_results") -> DoubanMatchCandidate:
     return DoubanMatchCandidate(
         source_raw_id=match_input.source_raw_id,
-        source_file=match_input.source_file,
+        source_sheet_name=match_input.source_sheet_name,
         source_row_number=match_input.source_row_number,
         query_title=match_input.title,
         status=DoubanMatchStatus.NO_MATCH,
@@ -458,7 +458,7 @@ def _to_review_candidate(
 ) -> DoubanMatchCandidate:
     return DoubanMatchCandidate(
         source_raw_id=match_input.source_raw_id,
-        source_file=match_input.source_file,
+        source_sheet_name=match_input.source_sheet_name,
         source_row_number=match_input.source_row_number,
         query_title=match_input.title,
         status=DoubanMatchStatus.NEEDS_REVIEW,
@@ -475,7 +475,7 @@ def _to_scored_search_candidate(match_input: DoubanMatchInput, search_result: Do
     score = score_search_result(match_input, search_result)
     return DoubanMatchCandidate(
         source_raw_id=match_input.source_raw_id,
-        source_file=match_input.source_file,
+        source_sheet_name=match_input.source_sheet_name,
         source_row_number=match_input.source_row_number,
         query_title=match_input.title,
         status=score.status,
@@ -549,7 +549,7 @@ def _extract_year(context: str) -> int | None:
 
 def _extract_director(context: str) -> str | None:
     text = _clean_html_text(context)
-    match = re.search(r"导演[:：]\s*([^/]+)", text)
+    match = re.search(r"(?:\u5bfc\u6f14|瀵兼紨)[:\uff1a]\s*([^/]+)", text)
     if match is None:
         return None
     return match.group(1).strip() or None
@@ -573,3 +573,5 @@ def _search_result_from_json(payload: dict[str, str | int | None]) -> DoubanSear
         director=str(payload["director"]) if payload.get("director") is not None else None,
         url=str(payload["url"]) if payload.get("url") is not None else None,
     )
+
+

@@ -1,4 +1,4 @@
-import unittest
+﻿import unittest
 from datetime import date
 from tempfile import TemporaryDirectory
 
@@ -29,7 +29,7 @@ class MatchingServiceTest(unittest.TestCase):
             [
                 ViewingHistoryCandidate(
                     source_raw_id="raw-1",
-                    source_file="MOVIES.xlsx#2026",
+                    source_sheet_name="MOVIES.xlsx#2026",
                     source_row_number=2,
                     title="A Pale View of Hills",
                     user_rating=4.2,
@@ -39,7 +39,7 @@ class MatchingServiceTest(unittest.TestCase):
                 ),
                 ViewingHistoryCandidate(
                     source_raw_id="raw-2",
-                    source_file="MOVIES.xlsx#2025",
+                    source_sheet_name="MOVIES.xlsx#2025",
                     source_row_number=3,
                     title="Still Walking",
                     user_rating=4.5,
@@ -69,7 +69,7 @@ class MatchingServiceTest(unittest.TestCase):
             [
                 ViewingHistoryCandidate(
                     source_raw_id="raw-1",
-                    source_file="MOVIES.xlsx#2026",
+                    source_sheet_name="MOVIES.xlsx#2026",
                     source_row_number=2,
                     title="A Pale View of Hills",
                     user_rating=4.2,
@@ -79,7 +79,7 @@ class MatchingServiceTest(unittest.TestCase):
                 ),
                 ViewingHistoryCandidate(
                     source_raw_id="raw-2",
-                    source_file="MOVIES.xlsx#2025",
+                    source_sheet_name="MOVIES.xlsx#2025",
                     source_row_number=3,
                     title="Still Walking",
                     user_rating=4.5,
@@ -113,7 +113,7 @@ class MatchingServiceTest(unittest.TestCase):
             [
                 ViewingHistoryCandidate(
                     source_raw_id="raw-1",
-                    source_file="MOVIES.xlsx#2026",
+                    source_sheet_name="MOVIES.xlsx#2026",
                     source_row_number=2,
                     title="A Pale View of Hills",
                     user_rating=4.2,
@@ -121,7 +121,7 @@ class MatchingServiceTest(unittest.TestCase):
                 ),
                 ViewingHistoryCandidate(
                     source_raw_id="raw-2",
-                    source_file="MOVIES.xlsx#2025",
+                    source_sheet_name="MOVIES.xlsx#2025",
                     source_row_number=3,
                     title="Still Walking",
                     user_rating=4.5,
@@ -145,7 +145,7 @@ class MatchingServiceTest(unittest.TestCase):
             [
                 ViewingHistoryCandidate(
                     source_raw_id="raw-1",
-                    source_file="MOVIES.xlsx#2025",
+                    source_sheet_name="MOVIES.xlsx#2025",
                     source_row_number=3,
                     title="Still Walking",
                     user_rating=4.5,
@@ -178,7 +178,7 @@ class MatchingServiceTest(unittest.TestCase):
             [
                 ViewingHistoryCandidate(
                     source_raw_id="raw-1",
-                    source_file="MOVIES.xlsx#2025",
+                    source_sheet_name="MOVIES.xlsx#2025",
                     source_row_number=3,
                     title="Unknown Movie",
                     user_rating=4.0,
@@ -211,7 +211,7 @@ class MatchingServiceTest(unittest.TestCase):
             [
                 ViewingHistoryCandidate(
                     source_raw_id="raw-1",
-                    source_file="MOVIES.xlsx#2025",
+                    source_sheet_name="MOVIES.xlsx#2025",
                     source_row_number=3,
                     title="Unknown Movie",
                     user_rating=4.0,
@@ -228,7 +228,7 @@ class MatchingServiceTest(unittest.TestCase):
         candidates = [
             ViewingHistoryCandidate(
                 source_raw_id="raw-1",
-                source_file="MOVIES.xlsx#2025",
+                source_sheet_name="MOVIES.xlsx#2025",
                 source_row_number=3,
                 title="Still Walking",
                 user_rating=4.5,
@@ -240,7 +240,7 @@ class MatchingServiceTest(unittest.TestCase):
             ),
             ViewingHistoryCandidate(
                 source_raw_id="raw-2",
-                source_file="MOVIES.xlsx#2025",
+                source_sheet_name="MOVIES.xlsx#2025",
                 source_row_number=4,
                 title="Unknown Movie",
                 user_rating=4.0,
@@ -262,12 +262,12 @@ class MatchingServiceTest(unittest.TestCase):
 
         self.assertEqual(1, len(inputs))
         self.assertEqual("raw-1", inputs[0].source_raw_id)
-        self.assertEqual("MOVIES.xlsx#2025", inputs[0].source_file)
+        self.assertEqual("MOVIES.xlsx#2025", inputs[0].source_sheet_name)
         self.assertEqual(3, inputs[0].source_row_number)
         self.assertEqual("2222996", inputs[0].douban_subject_id)
         self.assertEqual(date(2025, 5, 1), inputs[0].watched_date)
         self.assertEqual(4.5, inputs[0].user_rating)
-        self.assertIsNone(inputs[0].source_row_hash)
+        self.assertIsNone(inputs[0].source_row_checksum)
         self.assertEqual("1080p", inputs[0].quality)
         self.assertEqual("great", inputs[0].comment)
         self.assertFalse(hasattr(inputs[0], "title"))
@@ -278,7 +278,7 @@ class MatchingServiceTest(unittest.TestCase):
         candidates = [
             ViewingHistoryCandidate(
                 source_raw_id="raw-1",
-                source_file="MOVIES.xlsx#2025",
+                source_sheet_name="MOVIES.xlsx#2025",
                 source_row_number=3,
                 title="Still Walking",
                 user_rating=4.5,
@@ -287,7 +287,7 @@ class MatchingServiceTest(unittest.TestCase):
             ),
             ViewingHistoryCandidate(
                 source_raw_id="raw-2",
-                source_file="MOVIES.xlsx#2025",
+                source_sheet_name="MOVIES.xlsx#2025",
                 source_row_number=4,
                 title="Bittersweet Life",
                 user_rating=4.0,
@@ -319,7 +319,7 @@ class MatchingServiceTest(unittest.TestCase):
             [
                 ViewingHistoryCandidate(
                     source_raw_id="raw-1",
-                    source_file="MOVIES.xlsx#2026",
+                    source_sheet_name="MOVIES.xlsx#2026",
                     source_row_number=2,
                     title="A Pale View of Hills",
                     user_rating=4.2,
@@ -327,7 +327,7 @@ class MatchingServiceTest(unittest.TestCase):
                 ),
                 ViewingHistoryCandidate(
                     source_raw_id="raw-2",
-                    source_file="MOVIES.xlsx#2025",
+                    source_sheet_name="MOVIES.xlsx#2025",
                     source_row_number=3,
                     title="Still Walking",
                     user_rating=4.5,
@@ -336,7 +336,7 @@ class MatchingServiceTest(unittest.TestCase):
                 ),
                 ViewingHistoryCandidate(
                     source_raw_id="raw-3",
-                    source_file="MOVIES.xlsx#2025",
+                    source_sheet_name="MOVIES.xlsx#2025",
                     source_row_number=4,
                     title="Unknown Movie",
                     user_rating=4.0,
@@ -379,7 +379,7 @@ class MatchingServiceTest(unittest.TestCase):
             [
                 ViewingHistoryCandidate(
                     source_raw_id="raw-1",
-                    source_file="MOVIES.xlsx#2025",
+                    source_sheet_name="MOVIES.xlsx#2025",
                     source_row_number=3,
                     title="Still Walking",
                     user_rating=4.5,
@@ -406,9 +406,9 @@ class MatchingServiceTest(unittest.TestCase):
             [
                 ViewingHistoryCandidate(
                     source_raw_id="raw-1",
-                    source_file="MOVIES.xlsx#2023",
+                    source_sheet_name="MOVIES.xlsx#2023",
                     source_row_number=75,
-                    title="消失的她",
+                    title="娑堝け鐨勫ス",
                     user_rating=4.0,
                     release_year=2023,
                 ),
@@ -416,9 +416,9 @@ class MatchingServiceTest(unittest.TestCase):
         )
         adapter = FakeDoubanSearchAdapter(
             {
-                "消失的她": [
-                    DoubanSearchResult(subject_id="wrong", title="消失的她之豪门千金", year=2023),
-                    DoubanSearchResult(subject_id="right", title="消失的她", year=2023),
+                "娑堝け鐨勫ス": [
+                    DoubanSearchResult(subject_id="wrong", title="wrong sequel", year=2023),
+                    DoubanSearchResult(subject_id="right", title="娑堝け鐨勫ス", year=2023),
                 ]
             }
         )
@@ -434,7 +434,7 @@ class MatchingServiceTest(unittest.TestCase):
             [
                 ViewingHistoryCandidate(
                     source_raw_id="raw-1",
-                    source_file="MOVIES.xlsx#2025",
+                    source_sheet_name="MOVIES.xlsx#2025",
                     source_row_number=3,
                     title="Bitter Sweet Life",
                     user_rating=4.5,
@@ -461,7 +461,7 @@ class MatchingServiceTest(unittest.TestCase):
             [
                 ViewingHistoryCandidate(
                     source_raw_id="raw-1",
-                    source_file="MOVIES.xlsx#2025",
+                    source_sheet_name="MOVIES.xlsx#2025",
                     source_row_number=3,
                     title="Still Walking",
                     user_rating=4.5,
@@ -486,7 +486,7 @@ class MatchingServiceTest(unittest.TestCase):
     def test_cached_search_adapter_reuses_results_by_normalized_metadata_key(self) -> None:
         first = ViewingHistoryCandidate(
             source_raw_id="raw-1",
-            source_file="MOVIES.xlsx#2025",
+            source_sheet_name="MOVIES.xlsx#2025",
             source_row_number=3,
             title="Still   Walking",
             user_rating=4.5,
@@ -495,7 +495,7 @@ class MatchingServiceTest(unittest.TestCase):
         )
         second = ViewingHistoryCandidate(
             source_raw_id="raw-2",
-            source_file="MOVIES.xlsx#2025",
+            source_sheet_name="MOVIES.xlsx#2025",
             source_row_number=4,
             title="still walking",
             user_rating=4.4,
@@ -528,7 +528,7 @@ class MatchingServiceTest(unittest.TestCase):
     def test_cached_search_adapter_caches_empty_results(self) -> None:
         candidate = ViewingHistoryCandidate(
             source_raw_id="raw-1",
-            source_file="MOVIES.xlsx#2025",
+            source_sheet_name="MOVIES.xlsx#2025",
             source_row_number=3,
             title="Unknown Movie",
             user_rating=4.0,
@@ -552,7 +552,7 @@ class MatchingServiceTest(unittest.TestCase):
             [
                 ViewingHistoryCandidate(
                     source_raw_id="raw-1",
-                    source_file="MOVIES.xlsx#2025",
+                    source_sheet_name="MOVIES.xlsx#2025",
                     source_row_number=3,
                     title="Still Walking",
                     user_rating=4.5,
@@ -595,13 +595,13 @@ class MatchingServiceTest(unittest.TestCase):
           <h3>
             <a href="https://movie.douban.com/subject/2222996/">Still Walking</a>
           </h3>
-          <span class="subject-cast">导演: Hirokazu Kore-eda / 2008 / Japan</span>
+          <span class="subject-cast">瀵兼紨: Hirokazu Kore-eda / 2008 / Japan</span>
         </div>
         <div class="result">
           <h3>
             <a href="https://movie.douban.com/subject/1291561/">Yi Yi</a>
           </h3>
-          <span class="subject-cast">导演: Edward Yang / 2000 / Taiwan</span>
+          <span class="subject-cast">瀵兼紨: Edward Yang / 2000 / Taiwan</span>
         </div>
         """
 
@@ -623,7 +623,7 @@ class MatchingServiceTest(unittest.TestCase):
             <a href="https://www.douban.com/link2/?url=https%3A%2F%2Fmovie.douban.com%2Fsubject%2F2222996%2F"
                onclick="moreurl(this,{sid: 2222996})">Still Walking</a>
           </div>
-          <span class="subject-cast">导演: Hirokazu Kore-eda / 2008 / Japan</span>
+          <span class="subject-cast">瀵兼紨: Hirokazu Kore-eda / 2008 / Japan</span>
         </div>
         """
 
@@ -636,7 +636,7 @@ class MatchingServiceTest(unittest.TestCase):
     def test_file_search_cache_round_trips_results(self) -> None:
         candidate = ViewingHistoryCandidate(
             source_raw_id="raw-1",
-            source_file="MOVIES.xlsx#2025",
+            source_sheet_name="MOVIES.xlsx#2025",
             source_row_number=3,
             title="Still Walking",
             user_rating=4.5,
@@ -662,7 +662,7 @@ class MatchingServiceTest(unittest.TestCase):
     def test_http_adapter_builds_movie_search_url_from_metadata(self) -> None:
         candidate = ViewingHistoryCandidate(
             source_raw_id="raw-1",
-            source_file="MOVIES.xlsx#2025",
+            source_sheet_name="MOVIES.xlsx#2025",
             source_row_number=3,
             title="Still Walking",
             user_rating=4.5,
@@ -682,3 +682,6 @@ class MatchingServiceTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+

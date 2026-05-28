@@ -13,3 +13,7 @@ Triage uses the default five-label vocabulary: `needs-triage`, `needs-info`, `re
 ### Domain docs
 
 This is a single-context project with root `CONTEXT.md` and root `docs/adr/` for architectural decisions. See `docs/agents/domain.md`.
+
+## Repository safety
+
+Do not run any `git` command unless the user explicitly allows it in the current conversation. This includes read-only commands such as `git status`, staging, committing, and pushing.

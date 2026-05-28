@@ -148,7 +148,7 @@ function RecordWatchedView() {
   const [selected, setSelected] = useState<SearchCandidate | null>(null);
   const [form, setForm] = useState<RecordForm>({
     watched_date: today,
-    rating: "4.5",
+    rating: "4.0",
     quality: "1080p",
     comment: "",
     sheet: String(new Date().getFullYear())
@@ -210,7 +210,7 @@ function RecordWatchedView() {
         <div className="toolbar wide">
           <label>
             Movie
-            <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Still Walking" />
+            <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Enter name or id" />
           </label>
           <button className="primary" disabled={loading || !query.trim()}>
             Search

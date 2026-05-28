@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Protocol
@@ -16,8 +16,9 @@ class PersistedMovie:
 @dataclass(frozen=True)
 class PersistedViewingHistory:
     id: str
-    movie_id: str
-    source_row_hash: str
+    douban_subject_id: str
+    movie_id: str | None
+    source_row_checksum: str
 
 
 @dataclass(frozen=True)
@@ -56,6 +57,12 @@ class ViewingHistoryRepository(Protocol):
     def find_watched_movies(self, limit: int | None = None) -> list[PersistedMovie]:
         pass
 
+    def find_history_subject_ids_missing_movies(self, limit: int | None = None) -> list[str]:
+        pass
+
+    def backfill_viewing_history_movie_id(self, douban_subject_id: str, movie_id: str) -> int:
+        pass
+
     def find_unprocessed_watched_movies_for_history_recommendations(
         self,
         limit: int | None = None,
@@ -79,7 +86,7 @@ class ViewingHistoryRepository(Protocol):
     def upsert_viewing_history(
         self,
         confirmed: ConfirmedViewingHistoryInput,
-        movie_id: str,
+        movie_id: str | None = None,
     ) -> PersistedViewingHistory:
         pass
 
@@ -111,3 +118,5 @@ class ViewingHistoryRepository(Protocol):
 
     def upsert_candidate_pool_entry(self, movie_id: str, source_type: str, source_ref: str) -> bool:
         pass
+
+

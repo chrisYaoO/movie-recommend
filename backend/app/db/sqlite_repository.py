@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from dataclasses import asdict
 from datetime import date, datetime, timezone
@@ -40,8 +40,6 @@ class SQLiteViewingHistoryRepository:
                 douban_subject_id TEXT NOT NULL UNIQUE,
                 douban_url TEXT,
                 title TEXT NOT NULL,
-                display_title TEXT,
-                original_title TEXT,
                 aka_titles_json TEXT NOT NULL DEFAULT '[]',
                 year INTEGER,
                 directors_json TEXT NOT NULL,
@@ -60,13 +58,14 @@ class SQLiteViewingHistoryRepository:
 
             CREATE TABLE IF NOT EXISTS viewing_history (
                 id TEXT PRIMARY KEY,
-                movie_id TEXT NOT NULL REFERENCES movies(id),
+                movie_id TEXT REFERENCES movies(id),
+                douban_subject_id TEXT NOT NULL,
                 watched_date TEXT,
                 user_rating REAL NOT NULL,
                 quality TEXT,
                 comment TEXT,
-                source_row_hash TEXT NOT NULL UNIQUE,
-                source_file TEXT NOT NULL,
+                source_row_checksum TEXT NOT NULL,
+                source_sheet_name TEXT NOT NULL,
                 source_row_number INTEGER NOT NULL,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
@@ -104,13 +103,12 @@ class SQLiteViewingHistoryRepository:
             );
             """
         )
-        self._add_column_if_missing("movies", "display_title", "TEXT")
-        self._add_column_if_missing("movies", "original_title", "TEXT")
         self._add_column_if_missing("movies", "aka_titles_json", "TEXT NOT NULL DEFAULT '[]'")
+        self._add_column_if_missing("viewing_history", "douban_subject_id", "TEXT")
         self.connection.execute(
             """
             CREATE UNIQUE INDEX IF NOT EXISTS idx_viewing_history_source_row
-            ON viewing_history(source_file, source_row_number)
+            ON viewing_history(source_sheet_name, source_row_number)
             """
         )
         self.connection.commit()
@@ -128,8 +126,8 @@ class SQLiteViewingHistoryRepository:
         confirmed: ConfirmedViewingHistoryInput,
         detail: DoubanMovieDetail,
     ) -> PersistViewingHistoryResult:
-        if not confirmed.source_row_hash:
-            raise ValueError("source_row_hash is required when raw viewing history is not persisted")
+        if not confirmed.source_row_checksum:
+            raise ValueError("source_row_checksum is required when raw viewing history is not persisted")
         if confirmed.douban_subject_id != detail.subject_id:
             raise ValueError("confirmed subject id does not match detail subject id")
 
@@ -155,7 +153,7 @@ class SQLiteViewingHistoryRepository:
         sql = """
             SELECT m.id, m.douban_subject_id, m.title, MIN(vh.created_at) AS first_watched_created_at
             FROM viewing_history vh
-            JOIN movies m ON m.id = vh.movie_id
+            JOIN movies m ON m.douban_subject_id = vh.douban_subject_id
             GROUP BY m.id, m.douban_subject_id, m.title
             ORDER BY first_watched_created_at, m.douban_subject_id
         """
@@ -173,6 +171,35 @@ class SQLiteViewingHistoryRepository:
             for row in rows
         ]
 
+    def find_history_subject_ids_missing_movies(self, limit: int | None = None) -> list[str]:
+        sql = """
+            SELECT vh.douban_subject_id, MIN(vh.created_at) AS first_watched_created_at
+            FROM viewing_history vh
+            LEFT JOIN movies m ON m.douban_subject_id = vh.douban_subject_id
+            WHERE m.id IS NULL
+            GROUP BY vh.douban_subject_id
+            ORDER BY first_watched_created_at, vh.douban_subject_id
+        """
+        params: tuple[int, ...] = ()
+        if limit is not None:
+            sql += " LIMIT ?"
+            params = (limit,)
+        rows = self.connection.execute(sql, params).fetchall()
+        return [str(row["douban_subject_id"]) for row in rows]
+
+    def backfill_viewing_history_movie_id(self, douban_subject_id: str, movie_id: str) -> int:
+        cursor = self.connection.execute(
+            """
+            UPDATE viewing_history
+            SET movie_id = ?, updated_at = ?
+            WHERE douban_subject_id = ?
+              AND (movie_id IS NULL OR movie_id <> ?)
+            """,
+            (movie_id, _utc_now(), douban_subject_id, movie_id),
+        )
+        self.connection.commit()
+        return int(cursor.rowcount or 0)
+
     def find_unprocessed_watched_movies_for_history_recommendations(
         self,
         limit: int | None = None,
@@ -182,7 +209,7 @@ class SQLiteViewingHistoryRepository:
             FROM (
                 SELECT m.id, m.douban_subject_id, m.title, MIN(vh.created_at) AS first_watched_created_at
                 FROM viewing_history vh
-                JOIN movies m ON m.id = vh.movie_id
+                JOIN movies m ON m.douban_subject_id = vh.douban_subject_id
                 GROUP BY m.id, m.douban_subject_id, m.title
             ) watched
             LEFT JOIN history_recommendation_discovery discovery
@@ -213,7 +240,7 @@ class SQLiteViewingHistoryRepository:
                 FROM (
                     SELECT m.douban_subject_id
                     FROM viewing_history vh
-                    JOIN movies m ON m.id = vh.movie_id
+                    JOIN movies m ON m.douban_subject_id = vh.douban_subject_id
                     GROUP BY m.id, m.douban_subject_id
                 ) watched
                 LEFT JOIN history_recommendation_discovery discovery
@@ -257,17 +284,15 @@ class SQLiteViewingHistoryRepository:
         self.connection.execute(
             """
             INSERT INTO movies (
-                id, douban_subject_id, douban_url, title, display_title, original_title, aka_titles_json, year,
+                id, douban_subject_id, douban_url, title, aka_titles_json, year,
                 directors_json, actors_json, genres_json, countries_json,
                 douban_rating, douban_vote_count, summary, poster_url,
                 raw_douban_json, metadata_status, created_at, updated_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(douban_subject_id) DO UPDATE SET
                 douban_url = excluded.douban_url,
                 title = excluded.title,
-                display_title = excluded.display_title,
-                original_title = excluded.original_title,
                 aka_titles_json = excluded.aka_titles_json,
                 year = excluded.year,
                 directors_json = excluded.directors_json,
@@ -287,8 +312,6 @@ class SQLiteViewingHistoryRepository:
                 detail.subject_id,
                 detail.url,
                 detail.title,
-                detail.display_title,
-                detail.original_title,
                 _json(detail.aka_titles),
                 detail.year,
                 _json(detail.directors),
@@ -311,14 +334,14 @@ class SQLiteViewingHistoryRepository:
     def upsert_viewing_history(
         self,
         confirmed: ConfirmedViewingHistoryInput,
-        movie_id: str,
+        movie_id: str | None = None,
     ) -> PersistedViewingHistory:
-        if not confirmed.source_row_hash:
-            raise ValueError("source_row_hash is required when raw viewing history is not persisted")
+        if not confirmed.source_row_checksum:
+            raise ValueError("source_row_checksum is required when raw viewing history is not persisted")
 
         existing = self.connection.execute(
-            "SELECT id FROM viewing_history WHERE source_file = ? AND source_row_number = ?",
-            (confirmed.source_file, confirmed.source_row_number),
+            "SELECT id FROM viewing_history WHERE source_sheet_name = ? AND source_row_number = ?",
+            (confirmed.source_sheet_name, confirmed.source_row_number),
         ).fetchone()
         history_id = str(existing["id"]) if existing is not None else str(uuid4())
         now = _utc_now()
@@ -326,28 +349,30 @@ class SQLiteViewingHistoryRepository:
         self.connection.execute(
             """
             INSERT INTO viewing_history (
-                id, movie_id, watched_date, user_rating, quality, comment,
-                source_row_hash, source_file, source_row_number, created_at, updated_at
+                id, movie_id, douban_subject_id, watched_date, user_rating, quality, comment,
+                source_row_checksum, source_sheet_name, source_row_number, created_at, updated_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(source_file, source_row_number) DO UPDATE SET
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(source_sheet_name, source_row_number) DO UPDATE SET
                 movie_id = excluded.movie_id,
+                douban_subject_id = excluded.douban_subject_id,
                 watched_date = excluded.watched_date,
                 user_rating = excluded.user_rating,
                 quality = excluded.quality,
                 comment = excluded.comment,
-                source_row_hash = excluded.source_row_hash,
+                source_row_checksum = excluded.source_row_checksum,
                 updated_at = excluded.updated_at
             """,
             (
                 history_id,
                 movie_id,
+                confirmed.douban_subject_id,
                 _date_to_text(confirmed.watched_date),
                 confirmed.user_rating,
                 confirmed.quality,
                 confirmed.comment,
-                confirmed.source_row_hash,
-                confirmed.source_file,
+                confirmed.source_row_checksum,
+                confirmed.source_sheet_name,
                 confirmed.source_row_number,
                 now,
                 now,
@@ -356,8 +381,9 @@ class SQLiteViewingHistoryRepository:
         self.connection.commit()
         return PersistedViewingHistory(
             id=history_id,
+            douban_subject_id=confirmed.douban_subject_id,
             movie_id=movie_id,
-            source_row_hash=confirmed.source_row_hash,
+            source_row_checksum=confirmed.source_row_checksum,
         )
 
     def upsert_candidate_subject(
@@ -474,3 +500,5 @@ def _date_to_text(value: date | None) -> str | None:
 
 def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+

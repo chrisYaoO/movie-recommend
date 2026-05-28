@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import argparse
 from dataclasses import asdict, dataclass
@@ -208,7 +208,7 @@ def process_candidate_queue(
             if item.source_type == DOUBAN_TOP250_SOURCE and page_source:
                 recommended_ids = recommendation_parser(page_source, item.douban_subject_id)
                 recommendation_discovered_count += len(recommended_ids)
-                _write_status(status_writer, f"[recommendation] discovered={len(recommended_ids)}")
+                inserted_this_subject = 0
                 for recommended_id in recommended_ids:
                     if repository.upsert_candidate_subject(
                         recommended_id,
@@ -218,6 +218,11 @@ def process_candidate_queue(
                         source_label=f"recommended from {source_label}",
                     ):
                         recommendation_inserted_count += 1
+                        inserted_this_subject += 1
+                _write_status(
+                    status_writer,
+                    f"[recommendation] discovered={len(recommended_ids)}, inserted={inserted_this_subject}",
+                )
 
             repository.mark_candidate_subject_status(item.douban_subject_id, QUEUE_STATUS_ENRICHED)
             remaining_count = repository.count_candidate_subjects_by_status(queue_status)
@@ -372,7 +377,7 @@ def parse_top250_subject_ids(html: str) -> list[str]:
 
 
 def parse_recommended_subject_ids(html: str, current_subject_id: str) -> list[str]:
-    if re.search(r"喜欢这部(?:电影|剧集)的人也喜欢", html) is None:
+    if re.search(r"(?:\u559c\u6b22\u8fd9\u90e8(?:\u7535\u5f71|\u5267\u96c6)\u7684\u4eba\u4e5f\u559c\u6b22|鍠滄杩欓儴(?:鐢靛奖|鍓ч泦)鐨勪汉涔熷枩娆?)", html) is None:
         return []
     parser = DoubanRecommendationSectionParser(current_subject_id)
     parser.feed(html)

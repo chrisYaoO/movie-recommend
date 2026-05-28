@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import argparse
 from dataclasses import asdict, dataclass
@@ -58,7 +58,7 @@ class ManualReviewSummary:
 
 @dataclass(frozen=True)
 class CandidateIndexes:
-    by_hash: dict[str, ViewingHistoryCandidate]
+    by_checksum: dict[str, ViewingHistoryCandidate]
     by_source_row: dict[tuple[str, int], ViewingHistoryCandidate]
     by_title_year: dict[tuple[str, int | None], ViewingHistoryCandidate]
 
@@ -73,7 +73,7 @@ def review_matched_history(
 ) -> ManualReviewSummary:
     state = _load_state(state_path)
     candidate_indexes = _load_candidate_indexes(excel_path)
-    terminal_items_by_hash = _terminal_items_by_hash(state)
+    terminal_items_by_checksum = _terminal_items_by_checksum(state)
     review_items = [
         item
         for item in state.get("items", [])
@@ -92,12 +92,12 @@ def review_matched_history(
             break
         candidate = _resolve_candidate_for_item(item, candidate_indexes, "review")
         if candidate is None:
-            item["review_error"] = "source row hash not found in Excel import"
+            item["review_error"] = "source row checksum not found in Excel import"
             item["review_status"] = "failed"
             failed_count += 1
             _write_state(state, state_path)
             continue
-        if _mark_duplicate_from_terminal_item(item, terminal_items_by_hash):
+        if _mark_duplicate_from_terminal_item(item, terminal_items_by_checksum):
             _write_state(state, state_path)
             continue
 
@@ -109,7 +109,7 @@ def review_matched_history(
         if answer == "1":
             item["status"] = REVIEW_REJECTED_STATUS
             item["review_decision"] = "rejected"
-            terminal_items_by_hash[item["source_row_hash"]] = item
+            terminal_items_by_checksum[item["source_row_checksum"]] = item
             rejected_count += 1
             _write_state(state, state_path)
             continue
@@ -123,7 +123,7 @@ def review_matched_history(
                 "review_decision": "confirmed",
             }
         )
-        terminal_items_by_hash[item["source_row_hash"]] = item
+        terminal_items_by_checksum[item["source_row_checksum"]] = item
         _write_state(state, state_path)
         print("Queued for persistence after review exits.")
 
@@ -161,11 +161,11 @@ def resolve_rejected_or_no_match_history(
 ) -> ManualReviewSummary:
     state = _load_state(state_path)
     candidate_indexes = _load_candidate_indexes(excel_path)
-    terminal_items_by_hash = _terminal_items_by_hash(state)
+    terminal_items_by_checksum = _terminal_items_by_checksum(state)
     review_items = [
         item
         for item in state.get("items", [])
-        if item.get("status") in MANUAL_ID_SOURCE_STATUSES and item.get("source_row_hash")
+        if item.get("status") in MANUAL_ID_SOURCE_STATUSES and _progress_row_checksum(item)
     ]
 
     confirmed_count = 0
@@ -181,12 +181,12 @@ def resolve_rejected_or_no_match_history(
             break
         candidate = _resolve_candidate_for_item(item, candidate_indexes, "manual_id")
         if candidate is None:
-            item["manual_id_error"] = "source row hash not found in Excel import"
+            item["manual_id_error"] = "source row checksum not found in Excel import"
             item["manual_id_status"] = "failed"
             failed_count += 1
             _write_state(state, state_path)
             continue
-        if _mark_duplicate_from_terminal_item(item, terminal_items_by_hash):
+        if _mark_duplicate_from_terminal_item(item, terminal_items_by_checksum):
             _write_state(state, state_path)
             continue
 
@@ -304,13 +304,13 @@ def resolve_rejected_or_no_match_history(
             )
             confirmed_count += 1
             _write_state(state, state_path)
-            print(f"Persisted {item.get('source_file')}:{item.get('source_row_number')}: {persisted.title}")
+            print(f"Persisted {item.get('source_sheet_name')}:{item.get('source_row_number')}: {persisted.title}")
             break
 
     remaining_count = sum(
         1
         for item in state.get("items", [])
-        if item.get("status") in MANUAL_ID_SOURCE_STATUSES and item.get("source_row_hash")
+        if item.get("status") in MANUAL_ID_SOURCE_STATUSES and _progress_row_checksum(item)
     )
     return ManualReviewSummary(
         review_candidate_count=len(review_items),
@@ -336,11 +336,11 @@ def batch_search_rejected_or_no_match_history(
 ) -> ManualReviewSummary:
     state = _load_state(state_path)
     candidate_indexes = _load_candidate_indexes(excel_path)
-    terminal_items_by_hash = _terminal_items_by_hash(state)
+    terminal_items_by_checksum = _terminal_items_by_checksum(state)
     review_items = [
         item
         for item in state.get("items", [])
-        if item.get("status") in MANUAL_ID_SOURCE_STATUSES and item.get("source_row_hash")
+        if item.get("status") in MANUAL_ID_SOURCE_STATUSES and _progress_row_checksum(item)
     ]
 
     confirmed_count = 0
@@ -354,19 +354,19 @@ def batch_search_rejected_or_no_match_history(
             break
         candidate = _resolve_candidate_for_item(item, candidate_indexes, "manual_id")
         if candidate is None:
-            item["manual_id_error"] = "source row hash not found in Excel import"
+            item["manual_id_error"] = "source row checksum not found in Excel import"
             item["manual_id_status"] = "failed"
             failed_count += 1
             _write_state(state, state_path)
             continue
-        if _mark_duplicate_from_terminal_item(item, terminal_items_by_hash):
+        if _mark_duplicate_from_terminal_item(item, terminal_items_by_checksum):
             _write_state(state, state_path)
             continue
 
         attempted_count += 1
         print()
         print(f"[batch-search-again] {attempted_count}/{review_limit}")
-        print(f"{candidate.source_file}:{candidate.source_row_number}")
+        print(f"{candidate.source_sheet_name}:{candidate.source_row_number}")
         print(f"Excel : {candidate.title} ({candidate.release_year or '-'})")
         try:
             search_result = _retry_search_for_manual_item(item, candidate, search_adapter, detail_adapter, repository)
@@ -380,7 +380,7 @@ def batch_search_rejected_or_no_match_history(
 
         if search_result == "auto_matched_persisted":
             confirmed_count += 1
-            terminal_items_by_hash[item["source_row_hash"]] = item
+            terminal_items_by_checksum[item["source_row_checksum"]] = item
         _write_state(state, state_path)
         print(f"Fresh Douban search status: {item.get('match_status')}, progress status: {item.get('status')}")
         _print_retry_search_candidate(item)
@@ -388,7 +388,7 @@ def batch_search_rejected_or_no_match_history(
     remaining_count = sum(
         1
         for item in state.get("items", [])
-        if item.get("status") in MANUAL_ID_SOURCE_STATUSES and item.get("source_row_hash")
+        if item.get("status") in MANUAL_ID_SOURCE_STATUSES and _progress_row_checksum(item)
     )
     return ManualReviewSummary(
         review_candidate_count=len(review_items),
@@ -435,7 +435,7 @@ def _retry_search_for_manual_item(
                 "persisted_title": persisted.title,
             }
         )
-        print(f"Persisted {item.get('source_file')}:{item.get('source_row_number')}: {persisted.title}")
+        print(f"Persisted {item.get('source_sheet_name')}:{item.get('source_row_number')}: {persisted.title}")
         return "auto_matched_persisted"
     if match.status.value == REVIEW_PENDING_STATUS:
         item["status"] = REVIEW_PENDING_STATUS
@@ -459,13 +459,13 @@ def _load_candidate_indexes(excel_path: str | Path) -> CandidateIndexes:
     import_service = ViewingHistoryImportService(InMemoryViewingHistoryRawRepository())
     import_service.import_excel(excel_path)
     mapping = import_service.to_viewing_history_candidates()
-    by_hash = {
-        candidate.source_row_hash: candidate
+    by_checksum = {
+        candidate.source_row_checksum: candidate
         for candidate in mapping.candidates
-        if candidate.source_row_hash is not None
+        if candidate.source_row_checksum is not None
     }
     by_source_row = {
-        (candidate.source_file, candidate.source_row_number): candidate
+        (candidate.source_sheet_name, candidate.source_row_number): candidate
         for candidate in mapping.candidates
     }
     by_title_year: dict[tuple[str, int | None], ViewingHistoryCandidate] = {}
@@ -478,7 +478,7 @@ def _load_candidate_indexes(excel_path: str | Path) -> CandidateIndexes:
             by_title_year[key] = candidate
     for key in duplicate_title_year_keys:
         by_title_year.pop(key, None)
-    return CandidateIndexes(by_hash=by_hash, by_source_row=by_source_row, by_title_year=by_title_year)
+    return CandidateIndexes(by_checksum=by_checksum, by_source_row=by_source_row, by_title_year=by_title_year)
 
 
 def _resolve_candidate_for_item(
@@ -486,18 +486,18 @@ def _resolve_candidate_for_item(
     candidate_indexes: CandidateIndexes,
     status_prefix: str,
 ) -> ViewingHistoryCandidate | None:
-    source_row_hash = item.get("source_row_hash")
-    if source_row_hash:
-        candidate = candidate_indexes.by_hash.get(source_row_hash)
+    source_row_checksum = _progress_row_checksum(item)
+    if source_row_checksum:
+        candidate = candidate_indexes.by_checksum.get(source_row_checksum)
         if candidate is not None:
             return candidate
 
-    source_file = item.get("source_file")
+    source_sheet_name = _progress_source_sheet_name(item)
     source_row_number = item.get("source_row_number")
-    if not source_file or not isinstance(source_row_number, int):
+    if not source_sheet_name or not isinstance(source_row_number, int):
         return None
 
-    candidate = candidate_indexes.by_source_row.get((source_file, source_row_number))
+    candidate = candidate_indexes.by_source_row.get((source_sheet_name, source_row_number))
     if candidate is None:
         candidate = candidate_indexes.by_title_year.get(
             _candidate_title_year_key(item.get("title"), item.get("release_year"))
@@ -505,9 +505,9 @@ def _resolve_candidate_for_item(
     if candidate is None:
         return None
 
-    item["source_row_hash"] = candidate.source_row_hash
+    item["source_row_checksum"] = candidate.source_row_checksum
     item["source_raw_id"] = candidate.source_raw_id
-    item["source_file"] = candidate.source_file
+    item["source_sheet_name"] = candidate.source_sheet_name
     item["source_row_number"] = candidate.source_row_number
     item["title"] = candidate.title
     item["release_year"] = candidate.release_year
@@ -517,28 +517,45 @@ def _resolve_candidate_for_item(
     return candidate
 
 
-def _terminal_items_by_hash(state: dict[str, Any]) -> dict[str, dict[str, Any]]:
+def _terminal_items_by_checksum(state: dict[str, Any]) -> dict[str, dict[str, Any]]:
     terminal_items: dict[str, dict[str, Any]] = {}
     for item in state.get("items", []):
-        source_row_hash = item.get("source_row_hash")
-        if item.get("status") in TERMINAL_STATUSES and source_row_hash:
-            terminal_items.setdefault(source_row_hash, item)
+        source_row_checksum = _progress_row_checksum(item)
+        if item.get("status") in TERMINAL_STATUSES and source_row_checksum:
+            terminal_items.setdefault(source_row_checksum, item)
     return terminal_items
+
+
+def _progress_row_checksum(item: dict[str, Any]) -> str | None:
+    return item.get("source_row_checksum") or item.get("source_row_hash")
+
+
+def _progress_source_sheet_name(item: dict[str, Any]) -> str | None:
+    source_sheet_name = item.get("source_sheet_name")
+    if source_sheet_name:
+        return str(source_sheet_name)
+    old_source_file = item.get("source_file")
+    if not old_source_file:
+        return None
+    source_text = str(old_source_file)
+    if "#" in source_text:
+        return source_text.rsplit("#", 1)[1]
+    return source_text
 
 
 def _mark_duplicate_from_terminal_item(
     item: dict[str, Any],
-    terminal_items_by_hash: dict[str, dict[str, Any]],
+    terminal_items_by_checksum: dict[str, dict[str, Any]],
 ) -> bool:
-    source_row_hash = item.get("source_row_hash")
-    if not source_row_hash:
+    source_row_checksum = _progress_row_checksum(item)
+    if not source_row_checksum:
         return False
-    terminal_item = terminal_items_by_hash.get(source_row_hash)
+    terminal_item = terminal_items_by_checksum.get(source_row_checksum)
     if terminal_item is None or terminal_item is item:
         return False
 
     item["status"] = terminal_item.get("status")
-    item["duplicate_of_source_row_hash"] = source_row_hash
+    item["duplicate_of_source_row_checksum"] = source_row_checksum
     for key in (
         "review_decision",
         "manual_id_decision",
@@ -577,7 +594,7 @@ def _persist_pending_confirmed_reviews(
 ) -> PendingPersistSummary:
     confirmed_count = 0
     failed_count = 0
-    terminal_items_by_hash = _terminal_items_by_hash(state)
+    terminal_items_by_checksum = _terminal_items_by_checksum(state)
     pending_items = [
         item
         for item in state.get("items", [])
@@ -591,11 +608,11 @@ def _persist_pending_confirmed_reviews(
         candidate = _resolve_candidate_for_item(item, candidate_indexes, "review")
         if candidate is None:
             item["review_status"] = "failed"
-            item["review_error"] = "source row hash not found in Excel import"
+            item["review_error"] = "source row checksum not found in Excel import"
             failed_count += 1
             _write_state(state, state_path)
             continue
-        if _mark_duplicate_from_terminal_item(item, terminal_items_by_hash):
+        if _mark_duplicate_from_terminal_item(item, terminal_items_by_checksum):
             _write_state(state, state_path)
             continue
 
@@ -607,7 +624,7 @@ def _persist_pending_confirmed_reviews(
             item["review_error"] = str(exc)
             failed_count += 1
             _write_state(state, state_path)
-            print(f"Failed {item.get('source_file')}:{item.get('source_row_number')}: {exc}")
+            print(f"Failed {item.get('source_sheet_name')}:{item.get('source_row_number')}: {exc}")
             continue
 
         item.update(
@@ -620,9 +637,9 @@ def _persist_pending_confirmed_reviews(
             }
         )
         confirmed_count += 1
-        terminal_items_by_hash[item["source_row_hash"]] = item
+        terminal_items_by_checksum[item["source_row_checksum"]] = item
         _write_state(state, state_path)
-        print(f"Persisted {item.get('source_file')}:{item.get('source_row_number')}: {persisted.title}")
+        print(f"Persisted {item.get('source_sheet_name')}:{item.get('source_row_number')}: {persisted.title}")
 
     return PendingPersistSummary(confirmed_count=confirmed_count, failed_count=failed_count)
 
@@ -633,12 +650,12 @@ def _to_confirmed_input(candidate: ViewingHistoryCandidate, item: dict[str, Any]
         raise ValueError("review item has no candidate_subject_id")
     return ConfirmedViewingHistoryInput(
         source_raw_id=candidate.source_raw_id,
-        source_file=candidate.source_file,
+        source_sheet_name=candidate.source_sheet_name,
         source_row_number=candidate.source_row_number,
         douban_subject_id=subject_id,
         watched_date=candidate.watched_date,
         user_rating=candidate.user_rating,
-        source_row_hash=candidate.source_row_hash,
+        source_row_checksum=candidate.source_row_checksum,
         quality=candidate.quality,
         comment=candidate.comment,
     )
@@ -647,12 +664,12 @@ def _to_confirmed_input(candidate: ViewingHistoryCandidate, item: dict[str, Any]
 def _to_manual_confirmed_input(candidate: ViewingHistoryCandidate, subject_id: str) -> ConfirmedViewingHistoryInput:
     return ConfirmedViewingHistoryInput(
         source_raw_id=candidate.source_raw_id,
-        source_file=candidate.source_file,
+        source_sheet_name=candidate.source_sheet_name,
         source_row_number=candidate.source_row_number,
         douban_subject_id=subject_id,
         watched_date=candidate.watched_date,
         user_rating=candidate.user_rating,
-        source_row_hash=candidate.source_row_hash,
+        source_row_checksum=candidate.source_row_checksum,
         quality=candidate.quality,
         comment=candidate.comment,
     )
@@ -666,7 +683,7 @@ def _print_review_item(
 ) -> None:
     print()
     print(f"[review] {current_index}/{total_count}")
-    print(f"{candidate.source_file}:{candidate.source_row_number}")
+    print(f"{candidate.source_sheet_name}:{candidate.source_row_number}")
     print(f"Excel : {candidate.title} ({candidate.release_year or '-'})")
     if candidate.director:
         print(f"Excel director: {candidate.director}")
@@ -686,7 +703,7 @@ def _print_manual_id_item(
 ) -> None:
     print()
     print(f"[manual-id] {current_index}/{total_count}")
-    print(f"{candidate.source_file}:{candidate.source_row_number}")
+    print(f"{candidate.source_sheet_name}:{candidate.source_row_number}")
     print(f"Excel : {candidate.title} ({candidate.release_year or '-'})")
     if candidate.director:
         print(f"Excel director: {candidate.director}")
@@ -880,3 +897,6 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
+
+

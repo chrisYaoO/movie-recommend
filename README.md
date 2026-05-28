@@ -66,9 +66,9 @@ pip install -r requirements-dev.txt
 Expected result:
 
 ```text
-Ran 52 tests
+Ran 118 tests
 
-OK (skipped=2)
+OK (skipped=3)
 ```
 
 The skipped tests are optional PostgreSQL integration tests. To run them, install PostgreSQL, create a test database, and set:
@@ -78,9 +78,9 @@ $env:MOVIES_POSTGRES_DSN="postgresql://user:password@localhost:5432/movies_test"
 .\.venv\Scripts\python.exe -m unittest backend.tests.test_postgres_repository
 ```
 
-## Import Auto-Matched History
+## Import And Rebuild Viewing History
 
-The current import job persists automatically matched records. It reads the whole workbook, persists rows with `DoubanSubjectId` / `movie_id` first, then processes rows without a subject id one at a time with resumable checkpoints in `data/cache/import-auto-match-progress.json`. `needs_review` and `no_match` rows are counted and skipped; use the review command below for manual confirmation.
+The current rebuild path treats Google Sheets as the source of truth for viewing history. Local `.xlsx` files are legacy snapshots unless explicitly needed for older review workflows.
 
 The CLI reads PostgreSQL connection settings from `--dsn`, `MOVIES_POSTGRES_DSN`, or local `.env`, in that order. A local `.env` should contain:
 
@@ -91,29 +91,35 @@ MOVIES_POSTGRES_DSN=postgresql://user:password@localhost:5432/movies
 By default the Google Sheets job reads service account credentials from `.secrets/google-sheets-service-account.json`.
 The spreadsheet id should be stored in that JSON as `spreadsheet_id`; `.env` does not need a Google Sheets id for the normal path.
 
-```powershell
-.\.venv\Scripts\python.exe -m jobs.import_auto_matched_history data\imports\MOVIES.xlsx
-```
-
-To import the current workbook, run:
-
-```powershell
-.\.venv\Scripts\python.exe -m jobs.import_auto_matched_history data\imports\MOVIES.xlsx --detail-adapter selenium
-```
-
-Selenium jobs default to Chrome at `C:\Program Files\Google\Chrome\Application\chrome.exe`; pass `--chrome-binary-path` only when using a different Chrome executable.
-
-To read the same history directly from Google Sheets without changing existing source-row identity, run:
-
-```powershell
-.\.venv\Scripts\python.exe -m jobs.sync_google_sheets_history --sheet 2026
-```
-
 To verify Google Sheets access without writing to PostgreSQL or fetching Douban details, run:
 
 ```powershell
-.\.venv\Scripts\python.exe -m jobs.sync_google_sheets_history --sheet 2026 --limit 2 --dry-run
+.\.venv\Scripts\python.exe -m jobs.sync_google_sheets_history --replay-confirmed-progress --dry-run
 ```
+
+To rebuild `viewing_history` from Google Sheets plus the existing confirmed progress JSON, run:
+
+```powershell
+.\.venv\Scripts\python.exe -m jobs.sync_google_sheets_history --replay-confirmed-progress
+```
+
+This command only writes `viewing_history`. It does not fetch Douban detail pages, does not write `movies`, and does not enqueue recommendations. It stores `douban_subject_id` directly on `viewing_history`; `movie_id` is nullable and is backfilled later after `movies` rows exist.
+
+Subject IDs are resolved in this order:
+
+1. Direct `movie_id` / `DoubanSubjectId` value in the sheet row.
+2. Confirmed `data/cache/import-auto-match-progress.json` entry matched by `(source_sheet_name, source_row_number)`.
+3. Confirmed progress entry matched by `source_row_checksum` as a fallback.
+
+Confirmed progress statuses use this priority:
+
+```text
+manual_id_persisted > review_confirmed_persisted > auto_matched_persisted
+```
+
+If the highest-priority confirmed entries for the same source row disagree on subject ID, the row is reported as a conflict and skipped.
+
+By default the sync job reads every sheet tab in the spreadsheet metadata. Pass one or more `--sheet` arguments only when you want to restrict the run to specific tabs. A Google Sheets row from tab `2026` is stored with `source_sheet_name=2026` and its original sheet row number. A row-content checksum is stored for change detection, but uniqueness comes from `source_sheet_name + source_row_number`.
 
 Share the Google Sheet with the `client_email` from the service account JSON. Use Editor access if this service account will later write back to the sheet. If you are syncing a public sheet, you can use an API key instead:
 
@@ -122,11 +128,26 @@ GOOGLE_SHEETS_SPREADSHEET_ID=your-spreadsheet-id
 GOOGLE_SHEETS_API_KEY=your-api-key
 ```
 
+After `viewing_history` is rebuilt, rebuild canonical movie metadata from the distinct watched subject IDs:
+
 ```powershell
-.\.venv\Scripts\python.exe -m jobs.sync_google_sheets_history --sheet 2026
+.\.venv\Scripts\python.exe -m jobs.rebuild_movies_from_history
 ```
 
-Repeat `--sheet` for multiple tabs. The default `--source-file-alias MOVIES.xlsx` is intentional: a Google Sheets row from tab `2026` is imported as `MOVIES.xlsx#2026` with the same row number and stable row hash as the downloaded Excel file, so already imported rows are updated rather than duplicated.
+Use `--limit N` for a smaller real batch, or `--dry-run` to list selected subject IDs without fetching or writing:
+
+```powershell
+.\.venv\Scripts\python.exe -m jobs.rebuild_movies_from_history --limit 5
+.\.venv\Scripts\python.exe -m jobs.rebuild_movies_from_history --dry-run --limit 5
+```
+
+The movie rebuild job fetches Douban detail pages, upserts `movies`, backfills `viewing_history.movie_id`, and enqueues one layer of Douban recommendations into `candidate_subject_queue`. Selenium jobs default to Chrome at `C:\Program Files\Google\Chrome\Application\chrome.exe`; pass `--chrome-binary-path` only when using a different Chrome executable.
+
+The older workbook importer still exists for legacy review and repair workflows. It reads a local workbook, uses resumable checkpoints in `data/cache/import-auto-match-progress.json`, and can fetch details while persisting confirmed rows:
+
+```powershell
+.\.venv\Scripts\python.exe -m jobs.import_auto_matched_history data\imports\MOVIES.xlsx --detail-adapter selenium
+```
 
 To reclassify older `no_match` checkpoint rows whose only blocker was `douban_search_no_year_match`, run:
 
@@ -183,7 +204,7 @@ This command records completed watched movies in `history_recommendation_discove
 Process queued subjects, enrich missing movie details, add movies to `candidate_pool`, and enqueue one layer of "recommended from" subjects:
 
 ```powershell
-.\.venv\Scripts\python.exe -m jobs.candidate_pool process-queue --limit 25
+.\.venv\Scripts\python.exe -m jobs.candidate_pool process-queue
 ```
 
 Use `--limit N` to process a different batch size:
@@ -242,7 +263,7 @@ To record a watched movie selected from search:
 }
 ```
 
-The API appends the row to Google Sheets first, then writes `movies` and `viewing_history` with `source_file=MOVIES.xlsx#<sheet>` and the appended sheet row number.
+The API appends the row to Google Sheets first, then writes `viewing_history` with `source_sheet_name=<sheet>`, the appended sheet row number, and `douban_subject_id`. If `movies` already has that subject, `movie_id` is filled immediately. If not, the request synchronously fetches the watched movie detail, writes `movies`, and fills `viewing_history.movie_id`. Detail-page recommendations are inserted into `candidate_subject_queue`; recommended candidates are later enriched and activated by `jobs.candidate_pool process-queue`.
 
 ## Run The Frontend
 

@@ -68,7 +68,7 @@ class ExcelReadResult:
 @dataclass(frozen=True)
 class ViewingHistoryMappingIssue:
     source_raw_id: str
-    source_file: str
+    source_sheet_name: str
     source_row_number: int
     reason: str
 
@@ -81,23 +81,24 @@ class ViewingHistoryMappingResult:
 
 class InMemoryViewingHistoryRawRepository:
     def __init__(self) -> None:
-        self.rows_by_hash: dict[str, ViewingHistoryRaw] = {}
+        self.rows_by_source: dict[tuple[str, int], ViewingHistoryRaw] = {}
 
     def add_if_absent(self, row: ViewingHistoryRaw) -> bool:
-        if row.source_row_hash in self.rows_by_hash:
+        key = (row.source_sheet_name, row.source_row_number)
+        if key in self.rows_by_source:
             return False
-        self.rows_by_hash[row.source_row_hash] = row
+        self.rows_by_source[key] = row
         return True
 
     def all(self) -> list[ViewingHistoryRaw]:
-        return list(self.rows_by_hash.values())
+        return list(self.rows_by_source.values())
 
 
 class ViewingHistoryImportService:
     def __init__(self, repository: InMemoryViewingHistoryRawRepository) -> None:
         self.repository = repository
 
-    def import_rows(self, source_file: str, rows: list[dict[str, Any]]) -> ImportResult:
+    def import_rows(self, source_name: str, rows: list[dict[str, Any]]) -> ImportResult:
         imported: list[ViewingHistoryRaw] = []
         skipped_duplicates = 0
         skipped_invalid = 0
@@ -109,8 +110,8 @@ class ViewingHistoryImportService:
 
             source_sheet = _normalize_cell(row.get(SOURCE_SHEET_KEY))
             row_number = row.get(SOURCE_ROW_NUMBER_KEY, index)
-            row_source = f"{source_file}#{source_sheet}" if source_sheet else source_file
-            raw = self._to_raw_row(row_source, int(row_number), row)
+            source_sheet_name = source_sheet or source_name
+            raw = self._to_raw_row(source_sheet_name, int(row_number), row)
             if self.repository.add_if_absent(raw):
                 imported.append(raw)
             else:
@@ -135,12 +136,12 @@ class ViewingHistoryImportService:
     def to_viewing_history_candidates(self) -> ViewingHistoryMappingResult:
         return map_raw_viewing_history(self.repository.all())
 
-    def _to_raw_row(self, source_file: str, row_number: int, row: dict[str, Any]) -> ViewingHistoryRaw:
+    def _to_raw_row(self, source_sheet_name: str, row_number: int, row: dict[str, Any]) -> ViewingHistoryRaw:
         values = {column: _normalize_cell(row.get(column)) for column in RAW_HASH_COLUMNS}
         return ViewingHistoryRaw(
-            source_file=source_file,
+            source_sheet_name=source_sheet_name,
             source_row_number=row_number,
-            source_row_hash=stable_row_hash(values),
+            source_row_checksum=stable_row_hash(values),
             date_raw=values["Date"],
             name_raw=values["Name"],
             director_raw=values["Director"],
@@ -175,11 +176,11 @@ def map_raw_viewing_history(rows: list[ViewingHistoryRaw]) -> ViewingHistoryMapp
         candidates.append(
             ViewingHistoryCandidate(
                 source_raw_id=row.id,
-                source_file=row.source_file,
+                source_sheet_name=row.source_sheet_name,
                 source_row_number=row.source_row_number,
                 title=title,
                 user_rating=rating,
-                source_row_hash=row.source_row_hash,
+                source_row_checksum=row.source_row_checksum,
                 watched_date=_parse_date(row.date_raw),
                 director=_normalize_cell(row.director_raw),
                 release_year=_parse_int(row.year_raw),
@@ -196,7 +197,7 @@ def map_raw_viewing_history(rows: list[ViewingHistoryRaw]) -> ViewingHistoryMapp
 def _mapping_issue(row: ViewingHistoryRaw, reason: str) -> ViewingHistoryMappingIssue:
     return ViewingHistoryMappingIssue(
         source_raw_id=row.id,
-        source_file=row.source_file,
+        source_sheet_name=row.source_sheet_name,
         source_row_number=row.source_row_number,
         reason=reason,
     )

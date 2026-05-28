@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from dataclasses import asdict
 from datetime import datetime, timezone
@@ -41,8 +41,6 @@ class PostgresViewingHistoryRepository:
                     douban_subject_id TEXT NOT NULL UNIQUE,
                     douban_url TEXT,
                     title TEXT NOT NULL,
-                    display_title TEXT,
-                    original_title TEXT,
                     aka_titles JSONB NOT NULL DEFAULT '[]'::jsonb,
                     year INTEGER,
                     directors JSONB NOT NULL DEFAULT '[]'::jsonb,
@@ -60,30 +58,50 @@ class PostgresViewingHistoryRepository:
                 )
                 """
             )
-            self.connection.execute("ALTER TABLE movies ADD COLUMN IF NOT EXISTS display_title TEXT")
-            self.connection.execute("ALTER TABLE movies ADD COLUMN IF NOT EXISTS original_title TEXT")
             self.connection.execute("ALTER TABLE movies ADD COLUMN IF NOT EXISTS aka_titles JSONB NOT NULL DEFAULT '[]'::jsonb")
             self.connection.execute(
                 """
                 CREATE TABLE IF NOT EXISTS viewing_history (
                     id UUID PRIMARY KEY,
-                    movie_id UUID NOT NULL REFERENCES movies(id),
+                    movie_id UUID REFERENCES movies(id),
+                    douban_subject_id TEXT NOT NULL,
                     watched_date DATE,
                     user_rating NUMERIC NOT NULL,
                     quality TEXT,
                     comment TEXT,
-                    source_row_hash TEXT NOT NULL UNIQUE,
-                    source_file TEXT NOT NULL,
+                    source_row_checksum TEXT NOT NULL,
+                    source_sheet_name TEXT NOT NULL,
                     source_row_number INTEGER NOT NULL,
                     created_at TIMESTAMPTZ NOT NULL,
                     updated_at TIMESTAMPTZ NOT NULL
                 )
                 """
             )
+            self.connection.execute("ALTER TABLE viewing_history ALTER COLUMN movie_id DROP NOT NULL")
+            self.connection.execute("ALTER TABLE viewing_history ADD COLUMN IF NOT EXISTS douban_subject_id TEXT")
+            self.connection.execute("ALTER TABLE viewing_history ADD COLUMN IF NOT EXISTS source_row_checksum TEXT")
+            self.connection.execute("ALTER TABLE viewing_history ADD COLUMN IF NOT EXISTS source_sheet_name TEXT")
+            self.connection.execute("ALTER TABLE viewing_history ADD COLUMN IF NOT EXISTS source_row_number INTEGER")
+            self.connection.execute("ALTER TABLE viewing_history DROP COLUMN IF EXISTS source_row_hash")
+            self.connection.execute("ALTER TABLE viewing_history DROP COLUMN IF EXISTS source_file")
             self.connection.execute(
                 """
-                CREATE UNIQUE INDEX IF NOT EXISTS idx_viewing_history_source_row
-                ON viewing_history(source_file, source_row_number)
+                UPDATE viewing_history vh
+                SET douban_subject_id = m.douban_subject_id
+                FROM movies m
+                WHERE vh.movie_id = m.id
+                  AND vh.douban_subject_id IS NULL
+                """
+            )
+            self.connection.execute("ALTER TABLE viewing_history ALTER COLUMN douban_subject_id SET NOT NULL")
+            self.connection.execute("ALTER TABLE viewing_history ALTER COLUMN source_row_checksum SET NOT NULL")
+            self.connection.execute("ALTER TABLE viewing_history ALTER COLUMN source_sheet_name SET NOT NULL")
+            self.connection.execute("ALTER TABLE viewing_history ALTER COLUMN source_row_number SET NOT NULL")
+            self.connection.execute("DROP INDEX IF EXISTS idx_viewing_history_source_row")
+            self.connection.execute(
+                """
+                CREATE UNIQUE INDEX idx_viewing_history_source_row
+                ON viewing_history(source_sheet_name, source_row_number)
                 """
             )
             self.connection.execute(
@@ -183,8 +201,8 @@ class PostgresViewingHistoryRepository:
         confirmed: ConfirmedViewingHistoryInput,
         detail: DoubanMovieDetail,
     ) -> PersistViewingHistoryResult:
-        if not confirmed.source_row_hash:
-            raise ValueError("source_row_hash is required when raw viewing history is not persisted")
+        if not confirmed.source_row_checksum:
+            raise ValueError("source_row_checksum is required when raw viewing history is not persisted")
         if confirmed.douban_subject_id != detail.subject_id:
             raise ValueError("confirmed subject id does not match detail subject id")
 
@@ -210,7 +228,7 @@ class PostgresViewingHistoryRepository:
         sql = """
             SELECT m.id, m.douban_subject_id, m.title, MIN(vh.created_at) AS first_watched_created_at
             FROM viewing_history vh
-            JOIN movies m ON m.id = vh.movie_id
+            JOIN movies m ON m.douban_subject_id = vh.douban_subject_id
             GROUP BY m.id, m.douban_subject_id, m.title
             ORDER BY first_watched_created_at, m.douban_subject_id
         """
@@ -228,6 +246,34 @@ class PostgresViewingHistoryRepository:
             for row in rows
         ]
 
+    def find_history_subject_ids_missing_movies(self, limit: int | None = None) -> list[str]:
+        sql = """
+            SELECT vh.douban_subject_id, MIN(vh.created_at) AS first_watched_created_at
+            FROM viewing_history vh
+            LEFT JOIN movies m ON m.douban_subject_id = vh.douban_subject_id
+            WHERE m.id IS NULL
+            GROUP BY vh.douban_subject_id
+            ORDER BY first_watched_created_at, vh.douban_subject_id
+        """
+        params: tuple[int, ...] = ()
+        if limit is not None:
+            sql += " LIMIT %s"
+            params = (limit,)
+        rows = self.connection.execute(sql, params).fetchall()
+        return [str(row["douban_subject_id"]) for row in rows]
+
+    def backfill_viewing_history_movie_id(self, douban_subject_id: str, movie_id: str) -> int:
+        cursor = self.connection.execute(
+            """
+            UPDATE viewing_history
+            SET movie_id = %s, updated_at = %s
+            WHERE douban_subject_id = %s
+              AND (movie_id IS NULL OR movie_id <> %s)
+            """,
+            (movie_id, datetime.now(timezone.utc), douban_subject_id, movie_id),
+        )
+        return int(cursor.rowcount or 0)
+
     def find_unprocessed_watched_movies_for_history_recommendations(
         self,
         limit: int | None = None,
@@ -237,7 +283,7 @@ class PostgresViewingHistoryRepository:
             FROM (
                 SELECT m.id, m.douban_subject_id, m.title, MIN(vh.created_at) AS first_watched_created_at
                 FROM viewing_history vh
-                JOIN movies m ON m.id = vh.movie_id
+                JOIN movies m ON m.douban_subject_id = vh.douban_subject_id
                 GROUP BY m.id, m.douban_subject_id, m.title
             ) watched
             LEFT JOIN history_recommendation_discovery discovery
@@ -267,7 +313,7 @@ class PostgresViewingHistoryRepository:
             FROM (
                 SELECT m.douban_subject_id
                 FROM viewing_history vh
-                JOIN movies m ON m.id = vh.movie_id
+                JOIN movies m ON m.douban_subject_id = vh.douban_subject_id
                 GROUP BY m.id, m.douban_subject_id
             ) watched
             LEFT JOIN history_recommendation_discovery discovery
@@ -310,13 +356,13 @@ class PostgresViewingHistoryRepository:
         self.connection.execute(
             """
             INSERT INTO movies (
-                id, douban_subject_id, douban_url, title, display_title, original_title, aka_titles, year,
+                id, douban_subject_id, douban_url, title, aka_titles, year,
                 directors, actors, genres, countries,
                 douban_rating, douban_vote_count, summary, poster_url,
                 raw_douban_json, metadata_status, created_at, updated_at
             )
             VALUES (
-                %s, %s, %s, %s, %s, %s, %s, %s,
+                %s, %s, %s, %s, %s, %s,
                 %s, %s, %s, %s,
                 %s, %s, %s, %s,
                 %s, %s, %s, %s
@@ -324,8 +370,6 @@ class PostgresViewingHistoryRepository:
             ON CONFLICT(douban_subject_id) DO UPDATE SET
                 douban_url = excluded.douban_url,
                 title = excluded.title,
-                display_title = excluded.display_title,
-                original_title = excluded.original_title,
                 aka_titles = excluded.aka_titles,
                 year = excluded.year,
                 directors = excluded.directors,
@@ -345,8 +389,6 @@ class PostgresViewingHistoryRepository:
                 detail.subject_id,
                 detail.url,
                 detail.title,
-                detail.display_title,
-                detail.original_title,
                 _jsonb(detail.aka_titles),
                 detail.year,
                 _jsonb(detail.directors),
@@ -368,14 +410,14 @@ class PostgresViewingHistoryRepository:
     def upsert_viewing_history(
         self,
         confirmed: ConfirmedViewingHistoryInput,
-        movie_id: str,
+        movie_id: str | None = None,
     ) -> PersistedViewingHistory:
-        if not confirmed.source_row_hash:
-            raise ValueError("source_row_hash is required when raw viewing history is not persisted")
+        if not confirmed.source_row_checksum:
+            raise ValueError("source_row_checksum is required when raw viewing history is not persisted")
 
         existing = self.connection.execute(
-            "SELECT id FROM viewing_history WHERE source_file = %s AND source_row_number = %s",
-            (confirmed.source_file, confirmed.source_row_number),
+            "SELECT id FROM viewing_history WHERE source_sheet_name = %s AND source_row_number = %s",
+            (confirmed.source_sheet_name, confirmed.source_row_number),
         ).fetchone()
         history_id = str(existing["id"]) if existing is not None else str(uuid4())
         now = datetime.now(timezone.utc)
@@ -383,28 +425,30 @@ class PostgresViewingHistoryRepository:
         self.connection.execute(
             """
             INSERT INTO viewing_history (
-                id, movie_id, watched_date, user_rating, quality, comment,
-                source_row_hash, source_file, source_row_number, created_at, updated_at
+                id, movie_id, douban_subject_id, watched_date, user_rating, quality, comment,
+                source_row_checksum, source_sheet_name, source_row_number, created_at, updated_at
             )
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-            ON CONFLICT(source_file, source_row_number) DO UPDATE SET
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            ON CONFLICT(source_sheet_name, source_row_number) DO UPDATE SET
                 movie_id = excluded.movie_id,
+                douban_subject_id = excluded.douban_subject_id,
                 watched_date = excluded.watched_date,
                 user_rating = excluded.user_rating,
                 quality = excluded.quality,
                 comment = excluded.comment,
-                source_row_hash = excluded.source_row_hash,
+                source_row_checksum = excluded.source_row_checksum,
                 updated_at = excluded.updated_at
             """,
             (
                 history_id,
                 movie_id,
+                confirmed.douban_subject_id,
                 confirmed.watched_date,
                 confirmed.user_rating,
                 confirmed.quality,
                 confirmed.comment,
-                confirmed.source_row_hash,
-                confirmed.source_file,
+                confirmed.source_row_checksum,
+                confirmed.source_sheet_name,
                 confirmed.source_row_number,
                 now,
                 now,
@@ -412,8 +456,9 @@ class PostgresViewingHistoryRepository:
         )
         return PersistedViewingHistory(
             id=history_id,
+            douban_subject_id=confirmed.douban_subject_id,
             movie_id=movie_id,
-            source_row_hash=confirmed.source_row_hash,
+            source_row_checksum=confirmed.source_row_checksum,
         )
 
     def upsert_candidate_subject(
@@ -520,3 +565,5 @@ def _jsonb(value):
     from psycopg.types.json import Jsonb
 
     return Jsonb(value)
+
+

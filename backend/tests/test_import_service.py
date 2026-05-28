@@ -1,4 +1,4 @@
-from datetime import date
+﻿from datetime import date
 import unittest
 from tempfile import TemporaryDirectory
 from pathlib import Path
@@ -41,7 +41,7 @@ class ViewingHistoryImportServiceTest(unittest.TestCase):
 
         self.assertEqual(1, result.imported_count)
         row = result.rows[0]
-        self.assertEqual("history.xlsx", row.source_file)
+        self.assertEqual("history.xlsx", row.source_sheet_name)
         self.assertEqual(1, row.source_row_number)
         self.assertEqual("Yi Yi", row.name_raw)
         self.assertEqual("2000", row.year_raw)
@@ -49,7 +49,7 @@ class ViewingHistoryImportServiceTest(unittest.TestCase):
         self.assertEqual("favorite", row.comment_raw)
         self.assertEqual("1291561", row.douban_subject_id_raw)
         self.assertEqual("123456", row.douban_image_id_raw)
-        self.assertEqual(64, len(row.source_row_hash))
+        self.assertEqual(64, len(row.source_row_checksum))
 
     def test_repeated_import_skips_duplicate_rows_by_stable_hash(self) -> None:
         rows = [
@@ -96,7 +96,7 @@ class ViewingHistoryImportServiceTest(unittest.TestCase):
         left_hash = stable_row_hash({column: left.get(column) for column in EXPECTED_COLUMNS})
         normalized_right = self.service._to_raw_row("history.xlsx", 1, right)
 
-        self.assertEqual(left_hash, normalized_right.source_row_hash)
+        self.assertEqual(left_hash, normalized_right.source_row_checksum)
 
     def test_read_excel_reads_all_sheets_maps_columns_and_filters_invalid_rows(self) -> None:
         with TemporaryDirectory() as directory:
@@ -136,11 +136,11 @@ class ViewingHistoryImportServiceTest(unittest.TestCase):
         self.assertEqual("Old Format", rows[2]["Name"])
         self.assertEqual(3, result.imported_count)
         self.assertEqual(0, result.skipped_invalid_count)
-        self.assertEqual("history.xlsx#2026", result.rows[0].source_file)
+        self.assertEqual("2026", result.rows[0].source_sheet_name)
         self.assertEqual(2, result.rows[0].source_row_number)
         self.assertEqual("1291561", result.rows[0].douban_subject_id_raw)
         self.assertEqual("456789", result.rows[0].douban_image_id_raw)
-        self.assertEqual("history.xlsx#Sheet1", result.rows[2].source_file)
+        self.assertEqual("Sheet1", result.rows[2].source_sheet_name)
 
     def test_preview_excel_does_not_import_rows(self) -> None:
         with TemporaryDirectory() as directory:
@@ -180,7 +180,7 @@ class ViewingHistoryImportServiceTest(unittest.TestCase):
         self.assertEqual([], mapping.issues)
         candidate = mapping.candidates[0]
         self.assertEqual(result.rows[0].id, candidate.source_raw_id)
-        self.assertEqual(result.rows[0].source_row_hash, candidate.source_row_hash)
+        self.assertEqual(result.rows[0].source_row_checksum, candidate.source_row_checksum)
         self.assertEqual("Yi Yi", candidate.title)
         self.assertEqual(date(2026, 5, 12), candidate.watched_date)
         self.assertEqual(2000, candidate.release_year)
@@ -204,3 +204,5 @@ class ViewingHistoryImportServiceTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+

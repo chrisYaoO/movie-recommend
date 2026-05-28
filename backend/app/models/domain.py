@@ -34,9 +34,9 @@ class DoubanMatchStatus(str, Enum):
 
 @dataclass(frozen=True)
 class ViewingHistoryRaw:
-    source_file: str
+    source_sheet_name: str
     source_row_number: int
-    source_row_hash: str
+    source_row_checksum: str
     date_raw: str | None
     name_raw: str | None
     director_raw: str | None
@@ -53,11 +53,11 @@ class ViewingHistoryRaw:
 @dataclass(frozen=True)
 class ViewingHistoryCandidate:
     source_raw_id: str
-    source_file: str
+    source_sheet_name: str
     source_row_number: int
     title: str
     user_rating: float
-    source_row_hash: str | None = None
+    source_row_checksum: str | None = None
     watched_date: date | None = None
     director: str | None = None
     release_year: int | None = None
@@ -70,7 +70,7 @@ class ViewingHistoryCandidate:
 @dataclass(frozen=True)
 class DoubanMatchInput:
     source_raw_id: str
-    source_file: str
+    source_sheet_name: str
     source_row_number: int
     title: str
     strategy: str
@@ -82,7 +82,7 @@ class DoubanMatchInput:
 @dataclass(frozen=True)
 class DoubanMatchCandidate:
     source_raw_id: str
-    source_file: str
+    source_sheet_name: str
     source_row_number: int
     query_title: str
     status: DoubanMatchStatus
@@ -106,12 +106,12 @@ class DoubanSearchResult:
 @dataclass(frozen=True)
 class ConfirmedViewingHistoryInput:
     source_raw_id: str
-    source_file: str
+    source_sheet_name: str
     source_row_number: int
     douban_subject_id: str
     watched_date: date | None
     user_rating: float
-    source_row_hash: str | None = None
+    source_row_checksum: str | None = None
     quality: str | None = None
     comment: str | None = None
 

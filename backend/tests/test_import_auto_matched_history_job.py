@@ -1,4 +1,4 @@
-import json
+﻿import json
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -77,14 +77,14 @@ class ImportAutoMatchedHistoryJobTest(unittest.TestCase):
     def test_completed_hashes_include_manual_review_terminal_statuses(self) -> None:
         state = {
             "items": [
-                {"source_row_hash": "auto", "status": "auto_matched_persisted"},
-                {"source_row_hash": "needs-review", "status": "needs_review"},
-                {"source_row_hash": "no-match", "status": "no_match"},
-                {"source_row_hash": "review-confirmed", "status": "review_confirmed_persisted"},
-                {"source_row_hash": "review-rejected", "status": "review_rejected"},
-                {"source_row_hash": "manual-persisted", "status": "manual_id_persisted"},
-                {"source_row_hash": "manual-rejected", "status": "manual_id_rejected"},
-                {"source_row_hash": "pending", "status": "pending"},
+                {"source_row_checksum": "auto", "status": "auto_matched_persisted"},
+                {"source_row_checksum": "needs-review", "status": "needs_review"},
+                {"source_row_checksum": "no-match", "status": "no_match"},
+                {"source_row_checksum": "review-confirmed", "status": "review_confirmed_persisted"},
+                {"source_row_checksum": "review-rejected", "status": "review_rejected"},
+                {"source_row_checksum": "manual-persisted", "status": "manual_id_persisted"},
+                {"source_row_checksum": "manual-rejected", "status": "manual_id_rejected"},
+                {"source_row_checksum": "pending", "status": "pending"},
             ]
         }
 
@@ -320,20 +320,20 @@ class ImportAutoMatchedHistoryJobTest(unittest.TestCase):
                     {
                         "items": [
                             {
-                                "source_row_hash": "old-hash",
-                                "source_file": "MOVIES.xlsx#2026",
+                                "source_row_checksum": "old-hash",
+                                "source_sheet_name": "2026",
                                 "source_row_number": 3,
                                 "status": "auto_matched_persisted",
                             },
                             {
-                                "source_row_hash": "old-hash-2",
-                                "source_file": "MOVIES.xlsx#2026",
+                                "source_row_checksum": "old-checksum-2",
+                                "source_sheet_name": "2026",
                                 "source_row_number": 4,
                                 "status": "needs_review",
                             },
                             {
-                                "source_row_hash": "old-hash-3",
-                                "source_file": "MOVIES.xlsx#2026",
+                                "source_row_checksum": "old-checksum-3",
+                                "source_sheet_name": "2026",
                                 "source_row_number": 5,
                                 "status": "no_match",
                             },
@@ -420,9 +420,9 @@ def _write_workbook(path: Path) -> None:
 
 def _no_year_match_item(candidate) -> dict:
     return {
-        "source_row_hash": candidate.source_row_hash,
+        "source_row_checksum": candidate.source_row_checksum,
         "source_raw_id": candidate.source_raw_id,
-        "source_file": candidate.source_file,
+        "source_sheet_name": candidate.source_sheet_name,
         "source_row_number": candidate.source_row_number,
         "title": candidate.title,
         "release_year": candidate.release_year,
@@ -463,3 +463,5 @@ def _detail(subject_id: str, title: str) -> DoubanMovieDetail:
 
 if __name__ == "__main__":
     unittest.main()
+
+

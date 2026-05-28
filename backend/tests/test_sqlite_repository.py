@@ -1,4 +1,4 @@
-import json
+﻿import json
 import unittest
 from datetime import date
 from pathlib import Path
@@ -15,7 +15,7 @@ class SQLiteViewingHistoryRepositoryTest(unittest.TestCase):
             with SQLiteViewingHistoryRepository(db_path) as repository:
                 repository.initialize_schema()
                 result = repository.persist_confirmed_viewing_history(
-                    _confirmed(source_row_hash="hash-1"),
+                    _confirmed(source_row_checksum="checksum-1"),
                     _detail(),
                 )
 
@@ -27,34 +27,35 @@ class SQLiteViewingHistoryRepositoryTest(unittest.TestCase):
 
         self.assertEqual("1291992", result.movie.douban_subject_id)
         self.assertEqual("1291992", movie["douban_subject_id"])
-        self.assertEqual("末路狂花 Thelma & Louise", movie["title"])
-        self.assertEqual("末路狂花 Thelma & Louise", movie["display_title"])
-        self.assertEqual("Thelma & Louise", movie["original_title"])
-        self.assertEqual(["塞尔玛与路易丝"], json.loads(movie["aka_titles_json"]))
+        self.assertEqual("Thelma and Louise", movie["title"])
+        self.assertEqual(["Aka Title"], json.loads(movie["aka_titles_json"]))
         self.assertEqual(["Ridley Scott"], json.loads(movie["directors_json"]))
-        self.assertEqual(["剧情", "惊悚", "犯罪"], json.loads(movie["genres_json"]))
+        self.assertEqual(["Drama", "Thriller", "Crime"], json.loads(movie["genres_json"]))
         self.assertEqual(9.0, movie["douban_rating"])
         self.assertEqual(353101, movie["douban_vote_count"])
         self.assertEqual(result.movie.id, history["movie_id"])
+        self.assertEqual("1291992", history["douban_subject_id"])
         self.assertEqual("2026-03-19", history["watched_date"])
         self.assertEqual(4.2, history["user_rating"])
         self.assertEqual("1080p", history["quality"])
         self.assertEqual("test comment", history["comment"])
-        self.assertEqual("hash-1", history["source_row_hash"])
-        self.assertEqual("MOVIES.xlsx#2026", history["source_file"])
+        self.assertEqual("checksum-1", history["source_row_checksum"])
+        self.assertEqual("MOVIES.xlsx#2026", history["source_sheet_name"])
         self.assertIsNone(raw_table)
+        self.assertNotIn("display_title", movie.keys())
+        self.assertNotIn("original_title", movie.keys())
 
-    def test_reimport_same_source_row_hash_updates_existing_history(self) -> None:
+    def test_reimport_same_source_row_checksum_updates_existing_history(self) -> None:
         with TemporaryDirectory() as directory:
             db_path = Path(directory) / "movies.db"
             with SQLiteViewingHistoryRepository(db_path) as repository:
                 repository.initialize_schema()
                 first = repository.persist_confirmed_viewing_history(
-                    _confirmed(source_row_hash="hash-1", rating=4.0, comment="first"),
+                    _confirmed(source_row_checksum="checksum-1", rating=4.0, comment="first"),
                     _detail(rating=8.9),
                 )
                 second = repository.persist_confirmed_viewing_history(
-                    _confirmed(source_row_hash="hash-1", rating=4.5, comment="updated"),
+                    _confirmed(source_row_checksum="checksum-1", rating=4.5, comment="updated"),
                     _detail(rating=9.0),
                 )
 
@@ -69,6 +70,7 @@ class SQLiteViewingHistoryRepositoryTest(unittest.TestCase):
         self.assertEqual(1, history_count)
         self.assertEqual(9.0, movie["douban_rating"])
         self.assertEqual(4.5, history["user_rating"])
+        self.assertEqual("1291992", history["douban_subject_id"])
         self.assertEqual("updated", history["comment"])
 
     def test_reimport_same_source_row_with_changed_hash_updates_existing_history(self) -> None:
@@ -77,11 +79,11 @@ class SQLiteViewingHistoryRepositoryTest(unittest.TestCase):
             with SQLiteViewingHistoryRepository(db_path) as repository:
                 repository.initialize_schema()
                 first = repository.persist_confirmed_viewing_history(
-                    _confirmed(source_row_hash="hash-before", rating=4.0, comment="first"),
+                    _confirmed(source_row_checksum="checksum-before", rating=4.0, comment="first"),
                     _detail(rating=8.9),
                 )
                 second = repository.persist_confirmed_viewing_history(
-                    _confirmed(source_row_hash="hash-after", rating=4.5, comment="updated"),
+                    _confirmed(source_row_checksum="checksum-after", rating=4.5, comment="updated"),
                     _detail(rating=9.0),
                 )
 
@@ -90,18 +92,19 @@ class SQLiteViewingHistoryRepositoryTest(unittest.TestCase):
 
         self.assertEqual(first.history.id, second.history.id)
         self.assertEqual(1, history_count)
-        self.assertEqual("hash-after", history["source_row_hash"])
+        self.assertEqual("checksum-after", history["source_row_checksum"])
+        self.assertEqual("1291992", history["douban_subject_id"])
         self.assertEqual(4.5, history["user_rating"])
         self.assertEqual("updated", history["comment"])
 
-    def test_rejects_history_without_source_row_hash(self) -> None:
+    def test_rejects_history_without_source_row_checksum(self) -> None:
         with TemporaryDirectory() as directory:
             db_path = Path(directory) / "movies.db"
             with SQLiteViewingHistoryRepository(db_path) as repository:
                 repository.initialize_schema()
-                with self.assertRaisesRegex(ValueError, "source_row_hash"):
+                with self.assertRaisesRegex(ValueError, "source_row_checksum"):
                     repository.persist_confirmed_viewing_history(
-                        _confirmed(source_row_hash=None),
+                        _confirmed(source_row_checksum=None),
                         _detail(),
                     )
 
@@ -112,25 +115,25 @@ class SQLiteViewingHistoryRepositoryTest(unittest.TestCase):
                 repository.initialize_schema()
                 with self.assertRaisesRegex(ValueError, "does not match"):
                     repository.persist_confirmed_viewing_history(
-                        _confirmed(subject_id="1291992", source_row_hash="hash-1"),
+                        _confirmed(subject_id="1291992", source_row_checksum="checksum-1"),
                         _detail(subject_id="wrong"),
                     )
 
 
 def _confirmed(
     subject_id: str = "1291992",
-    source_row_hash: str | None = "hash-1",
+    source_row_checksum: str | None = "checksum-1",
     rating: float = 4.2,
     comment: str = "test comment",
 ) -> ConfirmedViewingHistoryInput:
     return ConfirmedViewingHistoryInput(
         source_raw_id="raw-1",
-        source_file="MOVIES.xlsx#2026",
+        source_sheet_name="MOVIES.xlsx#2026",
         source_row_number=8,
         douban_subject_id=subject_id,
         watched_date=date(2026, 3, 19),
         user_rating=rating,
-        source_row_hash=source_row_hash,
+        source_row_checksum=source_row_checksum,
         quality="1080p",
         comment=comment,
     )
@@ -139,15 +142,15 @@ def _confirmed(
 def _detail(subject_id: str = "1291992", rating: float = 9.0) -> DoubanMovieDetail:
     return DoubanMovieDetail(
         subject_id=subject_id,
-        title="末路狂花 Thelma & Louise",
-        display_title="末路狂花 Thelma & Louise",
+        title="Thelma and Louise",
+        display_title="Thelma and Louise",
         original_title="Thelma & Louise",
-        aka_titles=("塞尔玛与路易丝",),
+        aka_titles=("Aka Title",),
         year=1991,
         directors=("Ridley Scott",),
         actors=("Geena Davis", "Susan Sarandon"),
-        genres=("剧情", "惊悚", "犯罪"),
-        countries=("美国",),
+        genres=("Drama", "Thriller", "Crime"),
+        countries=("United States",),
         douban_rating=rating,
         douban_vote_count=353101,
         summary="A road movie.",
@@ -158,3 +161,6 @@ def _detail(subject_id: str = "1291992", rating: float = 9.0) -> DoubanMovieDeta
 
 if __name__ == "__main__":
     unittest.main()
+
+
+

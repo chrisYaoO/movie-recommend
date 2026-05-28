@@ -1,4 +1,4 @@
-import unittest
+﻿import unittest
 
 from backend.app.models.domain import DoubanSearchResult
 from backend.app.services.matching_service import FakeDoubanSearchAdapter
@@ -41,3 +41,5 @@ class MovieSearchServiceTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+

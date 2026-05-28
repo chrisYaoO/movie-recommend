@@ -1,4 +1,4 @@
-import unittest
+﻿import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
@@ -45,3 +45,5 @@ class EnrichDoubanJobTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+

@@ -32,7 +32,7 @@ class MovieSearchService:
 
         match_input = DoubanMatchInput(
             source_raw_id="api-search",
-            source_file="api",
+            source_sheet_name="api",
             source_row_number=0,
             title=normalized_query,
             strategy="metadata",

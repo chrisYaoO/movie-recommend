@@ -1,4 +1,4 @@
-from datetime import date
+﻿from datetime import date
 import os
 import unittest
 from unittest.mock import patch
@@ -120,3 +120,5 @@ class RecommendationServiceTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+

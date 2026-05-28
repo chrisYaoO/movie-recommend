@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Literal
@@ -12,7 +12,7 @@ PersistConfirmedHistoryStatus = Literal["existing", "fetched", "failed"]
 
 @dataclass(frozen=True)
 class PersistConfirmedHistoryItemResult:
-    source_row_hash: str | None
+    source_row_checksum: str | None
     douban_subject_id: str
     status: PersistConfirmedHistoryStatus
     movie_id: str | None = None
@@ -67,7 +67,7 @@ def persist_confirmed_viewing_history(
         except Exception as exc:
             results.append(
                 PersistConfirmedHistoryItemResult(
-                    source_row_hash=confirmed.source_row_hash,
+                    source_row_checksum=confirmed.source_row_checksum,
                     douban_subject_id=confirmed.douban_subject_id,
                     status="failed",
                     error=str(exc),
@@ -84,10 +84,12 @@ def _to_success_result(
     title: str,
 ) -> PersistConfirmedHistoryItemResult:
     return PersistConfirmedHistoryItemResult(
-        source_row_hash=confirmed.source_row_hash,
+        source_row_checksum=confirmed.source_row_checksum,
         douban_subject_id=confirmed.douban_subject_id,
         status=status,
         movie_id=persisted.movie.id,
         viewing_history_id=persisted.history.id,
         title=title,
     )
+
+

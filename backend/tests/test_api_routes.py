@@ -1,4 +1,4 @@
-import unittest
+﻿import unittest
 from datetime import date
 from unittest.mock import patch
 
@@ -56,7 +56,7 @@ class ApiRoutesTest(unittest.TestCase):
             response = record_viewing_history(request)
 
         self.assertEqual("2222996", response["douban_subject_id"])
-        self.assertEqual("MOVIES.xlsx#2026", response["source_file"])
+        self.assertEqual("2026", response["source_sheet_name"])
         self.assertEqual([request], fake_service.requests)
 
 
@@ -96,10 +96,12 @@ class _FakeRecordService:
             viewing_history_id="history-id",
             douban_subject_id=request.douban_subject_id,
             title="Still Walking",
-            source_file=f"MOVIES.xlsx#{request.sheet}",
+            source_sheet_name=request.sheet,
             source_row_number=27,
-            source_row_hash="hash",
+            source_row_checksum="hash",
             sheet_updated_range=f"{request.sheet}!A27:I27",
+            fetched_movie_detail=True,
+            recommendation_inserted_count=0,
         )
 
     def to_response(self, result):
@@ -108,12 +110,16 @@ class _FakeRecordService:
             "viewing_history_id": result.viewing_history_id,
             "douban_subject_id": result.douban_subject_id,
             "title": result.title,
-            "source_file": result.source_file,
+            "source_sheet_name": result.source_sheet_name,
             "source_row_number": result.source_row_number,
-            "source_row_hash": result.source_row_hash,
+            "source_row_checksum": result.source_row_checksum,
             "sheet_updated_range": result.sheet_updated_range,
+            "fetched_movie_detail": result.fetched_movie_detail,
+            "recommendation_inserted_count": result.recommendation_inserted_count,
         }
 
 
 if __name__ == "__main__":
     unittest.main()
+
+

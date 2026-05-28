@@ -380,15 +380,16 @@ class PostgresRecommendationRepository:
             """
             INSERT INTO viewing_history (
                 id, movie_id, watched_date, user_rating, quality, comment,
-                source_row_hash, source_file, source_row_number, created_at, updated_at
+                source_row_checksum, source_sheet_name, source_row_number, created_at, updated_at
             )
-            VALUES (%s, %s, %s, %s, %s, %s, %s, 'wishlist', 0, %s, %s)
-            ON CONFLICT(source_row_hash) DO UPDATE SET
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, 0, %s, %s)
+            ON CONFLICT(source_sheet_name, source_row_number) DO UPDATE SET
                 movie_id = excluded.movie_id,
                 watched_date = excluded.watched_date,
                 user_rating = excluded.user_rating,
                 quality = excluded.quality,
                 comment = excluded.comment,
+                source_row_checksum = excluded.source_row_checksum,
                 updated_at = excluded.updated_at
             """,
             (
@@ -398,6 +399,7 @@ class PostgresRecommendationRepository:
                 history.user_rating,
                 history.quality,
                 history.comment,
+                f"wishlist:{wishlist_id}",
                 f"wishlist:{wishlist_id}",
                 now,
                 now,

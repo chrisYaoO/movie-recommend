@@ -1,4 +1,4 @@
-import unittest
+﻿import unittest
 from datetime import date
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -20,7 +20,7 @@ class HistoryPersistenceServiceTest(unittest.TestCase):
                     repository.upsert_movie_detail(_detail("1291992", "Thelma & Louise"))
 
                 result = persist_confirmed_viewing_history(
-                    [_confirmed("1291992", "hash-1")],
+                    [_confirmed("1291992", "checksum-1")],
                     adapter,
                     repository,
                 )
@@ -34,7 +34,7 @@ class HistoryPersistenceServiceTest(unittest.TestCase):
         self.assertEqual(0, result.failed_count)
         self.assertEqual([], adapter.fetches)
         self.assertEqual(1, movie_count)
-        self.assertEqual("hash-1", history["source_row_hash"])
+        self.assertEqual("checksum-1", history["source_row_checksum"])
 
     def test_fetches_missing_movie_then_persists_detail_and_history(self) -> None:
         with TemporaryDirectory() as directory:
@@ -43,7 +43,7 @@ class HistoryPersistenceServiceTest(unittest.TestCase):
             with SQLiteViewingHistoryRepository(Path(directory) / "movies.db") as repository:
                 repository.initialize_schema()
                 result = persist_confirmed_viewing_history(
-                    [_confirmed("1291992", "hash-1")],
+                    [_confirmed("1291992", "checksum-1")],
                     adapter,
                     repository,
                 )
@@ -56,7 +56,7 @@ class HistoryPersistenceServiceTest(unittest.TestCase):
         self.assertEqual(1, result.fetched_count)
         self.assertEqual(["1291992"], adapter.fetches)
         self.assertEqual("1291992", movie["douban_subject_id"])
-        self.assertEqual("hash-1", history["source_row_hash"])
+        self.assertEqual("checksum-1", history["source_row_checksum"])
 
     def test_continues_after_failed_detail_lookup(self) -> None:
         with TemporaryDirectory() as directory:
@@ -66,8 +66,8 @@ class HistoryPersistenceServiceTest(unittest.TestCase):
                 repository.initialize_schema()
                 result = persist_confirmed_viewing_history(
                     [
-                        _confirmed("missing", "hash-missing"),
-                        _confirmed("ok", "hash-ok"),
+                        _confirmed("missing", "checksum-missing"),
+                        _confirmed("ok", "checksum-ok"),
                     ],
                     adapter,
                     repository,
@@ -86,7 +86,7 @@ class HistoryPersistenceServiceTest(unittest.TestCase):
         self.assertEqual(1, movie_count)
         self.assertEqual(1, history_count)
 
-    def test_reimport_same_source_row_hash_updates_history(self) -> None:
+    def test_reimport_same_source_row_checksum_updates_history(self) -> None:
         with TemporaryDirectory() as directory:
             adapter = FakeDoubanDetailAdapter()
 
@@ -96,12 +96,12 @@ class HistoryPersistenceServiceTest(unittest.TestCase):
                     repository.upsert_movie_detail(_detail("1291992", "Thelma & Louise"))
 
                 first = persist_confirmed_viewing_history(
-                    [_confirmed("1291992", "hash-1", rating=4.0, comment="first")],
+                    [_confirmed("1291992", "checksum-1", rating=4.0, comment="first")],
                     adapter,
                     repository,
                 )
                 second = persist_confirmed_viewing_history(
-                    [_confirmed("1291992", "hash-1", rating=4.5, comment="updated")],
+                    [_confirmed("1291992", "checksum-1", rating=4.5, comment="updated")],
                     adapter,
                     repository,
                 )
@@ -124,12 +124,12 @@ class HistoryPersistenceServiceTest(unittest.TestCase):
                     repository.upsert_movie_detail(_detail("1291992", "Thelma & Louise"))
 
                 first = persist_confirmed_viewing_history(
-                    [_confirmed("1291992", "hash-before", rating=4.0, comment="first")],
+                    [_confirmed("1291992", "checksum-before", rating=4.0, comment="first")],
                     adapter,
                     repository,
                 )
                 second = persist_confirmed_viewing_history(
-                    [_confirmed("1291992", "hash-after", rating=4.5, comment="updated")],
+                    [_confirmed("1291992", "checksum-after", rating=4.5, comment="updated")],
                     adapter,
                     repository,
                 )
@@ -139,25 +139,25 @@ class HistoryPersistenceServiceTest(unittest.TestCase):
 
         self.assertEqual(first.items[0].viewing_history_id, second.items[0].viewing_history_id)
         self.assertEqual(1, history_count)
-        self.assertEqual("hash-after", history["source_row_hash"])
+        self.assertEqual("checksum-after", history["source_row_checksum"])
         self.assertEqual(4.5, history["user_rating"])
         self.assertEqual("updated", history["comment"])
 
 
 def _confirmed(
     subject_id: str,
-    source_row_hash: str,
+    source_row_checksum: str,
     rating: float = 4.2,
     comment: str = "test comment",
 ) -> ConfirmedViewingHistoryInput:
     return ConfirmedViewingHistoryInput(
-        source_raw_id=f"raw-{source_row_hash}",
-        source_file="MOVIES.xlsx#2026",
+        source_raw_id=f"raw-{source_row_checksum}",
+        source_sheet_name="MOVIES.xlsx#2026",
         source_row_number=8,
         douban_subject_id=subject_id,
         watched_date=date(2026, 3, 19),
         user_rating=rating,
-        source_row_hash=source_row_hash,
+        source_row_checksum=source_row_checksum,
         quality="1080p",
         comment=comment,
     )
@@ -170,8 +170,8 @@ def _detail(subject_id: str, title: str) -> DoubanMovieDetail:
         year=1991,
         directors=("Ridley Scott",),
         actors=("Geena Davis",),
-        genres=("剧情", "犯罪"),
-        countries=("美国",),
+        genres=("鍓ф儏", "鐘姜"),
+        countries=("缇庡浗",),
         douban_rating=9.0,
         douban_vote_count=353101,
         url=f"https://movie.douban.com/subject/{subject_id}/",
@@ -180,3 +180,5 @@ def _detail(subject_id: str, title: str) -> DoubanMovieDetail:
 
 if __name__ == "__main__":
     unittest.main()
+
+
