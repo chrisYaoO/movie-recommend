@@ -5,7 +5,7 @@
 The system has four main parts:
 
 1. data jobs
-   - Excel import
+   - Google Sheets viewing-history sync
    - Douban matching
    - Douban metadata enrichment
    - candidate pool construction
@@ -25,12 +25,12 @@ Live recommendation must not call Douban. It only reads PostgreSQL.
 ## Data Flow
 
 ```text
-Excel viewing history
--> raw import table
--> Douban matcher
--> match candidates / confirmed matches
--> movie metadata enrichment
--> movies + viewing_history
+Google Sheets viewing history
++ existing confirmed progress JSON
+-> viewing_history with source row identity and Douban subject IDs
+-> movie metadata rebuild from distinct viewing_history subject IDs
+-> movies + viewing_history.movie_id backfill
+-> one-layer recommendation queue from watched detail pages
 -> recommender
 -> recommendation session + recommendation items
 -> frontend feedback
@@ -68,10 +68,11 @@ movies/
 |   |-- alembic/
 |   `-- tests/
 |-- jobs/
-|   |-- import_excel.py
-|   |-- match_douban.py
+|   |-- sync_google_sheets_history.py
+|   |-- import_auto_matched_history.py
+|   |-- rebuild_movies_from_history.py
 |   |-- enrich_douban.py
-|   `-- build_candidate_pool.py
+|   `-- candidate_pool.py
 |-- frontend/
 |   `-- src/
 `-- data/
@@ -90,7 +91,6 @@ id uuid primary key
 douban_subject_id text unique
 douban_url text
 title text not null
-original_title text
 year integer
 directors jsonb
 actors jsonb
@@ -111,13 +111,13 @@ updated_at timestamptz
 
 ### viewing_history_raw
 
-Raw Excel rows.
+Legacy raw imported rows. The current rebuild reads Google Sheets directly; local Excel files are historical snapshots only.
 
 ```text
 id uuid primary key
-source_file text
+source_sheet_name text
 source_row_number integer
-source_row_hash text unique
+source_row_checksum text
 date_raw text
 name_raw text
 director_raw text
@@ -134,15 +134,21 @@ Cleaned watched records.
 
 ```text
 id uuid primary key
-movie_id uuid references movies(id)
-source_raw_id uuid references viewing_history_raw(id)
+douban_subject_id text not null
+movie_id uuid references movies(id) -- nullable backfill cache
 watched_date date
 user_rating numeric
 quality text
 comment text
+source_sheet_name text
+source_row_number integer
+source_row_checksum text
 created_at timestamptz
 updated_at timestamptz
+unique(source_sheet_name, source_row_number)
 ```
+
+`source_sheet_name + source_row_number` is the stable source identity. `source_row_checksum` is a non-unique row-content checksum for change detection. `douban_subject_id` is the primary external movie identity for history rows; `movie_id` is filled after the corresponding `movies` row has been fetched.
 
 ### douban_match_candidates
 
@@ -184,9 +190,40 @@ id uuid primary key
 movie_id uuid references movies(id)
 source_type text
 source_ref text
+source_label text
 active boolean
 created_at timestamptz
 ```
+
+When a movie is recorded as watched from a recommendation card, its
+candidate-pool entry should be marked inactive after the viewing-history write
+succeeds. Viewing history remains the source of truth for watched state; the
+inactive flag prevents the candidate row from continuing to behave as an active
+recommendation source.
+
+This applies to every watched-recording path, including movies recorded from
+wishlist. Once a movie is in viewing history, any active candidate-pool rows for
+that movie should be inactive.
+
+Adding a movie to wishlist should not mark candidate-pool rows inactive. Active
+wishlist state is the exclusion mechanism. If the movie is later removed from
+wishlist and downgraded to maybe-later, the candidate-pool row can remain active
+unless another state such as watched or current not-interested makes it
+ineligible.
+
+Marking a movie as not interested should append a `not_interested` feedback
+event and mark active candidate-pool rows inactive. Clearing not-interested can
+restore candidate-pool rows only when the movie is otherwise eligible.
+
+Marking a movie as maybe-later should not deactivate candidate-pool rows in this
+frontend slice. It is a weak signal and may later feed recency/downrank logic.
+
+The record-watched request path must preserve the originating recommendation
+item when the user starts from a recommendation card. On success, it should
+write the viewing-history row, mark the `recommendation_items` row as
+watched/processed, and deactivate the related candidate-pool entry as one
+successful workflow. The `viewing_history` row should not carry recommendation
+processing status; that belongs to `recommendation_items`.
 
 ### candidate_subject_queue
 
@@ -226,6 +263,12 @@ Top250 subject
 Recommended subjects are queued for later enrichment but their own
 recommendations are not expanded in the first version.
 
+When a queued recommendation is activated into `candidate_pool`, the source
+movie title should be preserved as `source_label`. Recommendation API responses
+should expose this as a UI-ready label. Top-list sources may display raw
+`source_ref` values such as `top17`; recommendation-derived sources should
+display labels such as `Recommend from Yi Yi`, not raw Douban subject IDs.
+
 ### recommendation_sessions
 
 One click-generated batch.
@@ -249,6 +292,8 @@ rank integer
 slot_type text
 score numeric
 score_components jsonb
+processing_status text
+processed_at timestamptz
 created_at timestamptz
 ```
 
@@ -280,9 +325,27 @@ want_to_watch
 maybe_later
 not_interested
 opened_douban
+removed_from_wishlist
+clear_not_interested
 already_watched_correction
 match_error
 ```
+
+Feedback rows are append-only user-signal events. Later state changes should not
+mutate older feedback events. Removing a movie from wishlist should append a
+`removed_from_wishlist` event that downgrades the current state to maybe-later
+semantics. Removing a movie from the not-interested view should append
+`clear_not_interested`. Recommendation filtering should derive current movie
+state from the latest relevant event, not from the existence of any historical
+negative event alone.
+
+Clearing not-interested may reactivate the movie in `candidate_pool`, but only
+when it is still otherwise eligible: not present in `viewing_history` and not in
+active wishlist.
+
+The not-interested list should show only the current effective
+`not_interested` state. Movies with historical `not_interested` feedback that
+were later cleared by `clear_not_interested` should not appear in the list.
 
 ### wishlist
 
@@ -410,7 +473,7 @@ hybrid_score =
 
 The returned batch should contain:
 
-- three exploit items with high hybrid_score
+- four exploit items with high hybrid_score
 - two explore items selected to increase diversity across genre, country, era, director, or popularity level
 
 Current simple baseline implementation:
@@ -426,10 +489,21 @@ hybrid_total =
   + novelty * 0.10
 ```
 
+Frontend score display normalizes the raw `hybrid_total` to a 100-point display
+score. The current display baseline is `你的名字。 君の名は。`, whose measured
+`hybrid_total` is approximately `23.4568` on the current local dataset:
+
+```text
+display_score = round(hybrid_total / 23.4568 * 100)
+```
+
+This normalization is display-only. Ranking, persistence, and explore sampling
+continue to use raw `hybrid_total`.
+
 The service first scores every eligible candidate, sorts by `hybrid_total`, and assigns:
 
 ```text
-exploit slots = top 3 by hybrid_total
+exploit slots = top 4 by hybrid_total
 ```
 
 Then it selects two explore slots from the remaining candidates. Explore selection
@@ -465,7 +539,7 @@ diversity_gain =
   + decade_gain * 0.20
 ```
 
-This diversity score is batch-local. It prevents a single recommendation session from returning five very similar movies; it does not measure novelty against the user's full viewing history.
+This diversity score is batch-local. It prevents a single recommendation session from returning six very similar movies; it does not measure novelty against the user's full viewing history.
 
 ### Feedback Weights
 
@@ -513,8 +587,8 @@ GET  /movies/{movie_id}
 
 Primary screen.
 
-- button to request five recommendations
-- five movie cards
+- button to request six recommendations
+- six movie cards
 - actions:
   - want-to-watch
   - maybe-later

@@ -16,7 +16,7 @@ The first usable version should close the practical recommendation loop:
 import viewing history
 -> match and enrich movies
 -> build local candidate pool
--> click to recommend five movies
+-> click to recommend six movies
 -> collect feedback
 -> maintain wishlist
 -> record watched wishlist movies back into viewing history
@@ -30,9 +30,9 @@ The first version should be useful before true RL exists.
 
 A recommendation session is an on-demand interaction started by the user clicking a recommendation action. It is not a scheduled or daily feed.
 
-Each session returns exactly five movie candidates:
+Each session returns exactly six movie candidates:
 
-- three high-confidence candidates
+- four high-confidence candidates
 - two exploratory or diversity candidates
 
 The mix should balance immediate preference fit with discovery so the system does not narrow too quickly.
@@ -96,7 +96,7 @@ The user's ratings usually range from 3.5 to 5 and should be interpreted as pers
 
 ### Viewing History Source
 
-The user's historical viewing record starts as an Excel file. Excel is an import source, not the long-term system of record.
+The user's historical viewing record is maintained in Google Sheets. Local Excel files are historical snapshots only and should be ignored for the next rebuild unless the user explicitly asks to use them.
 
 Current Excel columns:
 
@@ -109,6 +109,10 @@ Current Excel columns:
 - Comment
 
 `Name` and `Rating` are sufficient for minimal import. `Director` and `Year` help disambiguate movie identity during matching.
+
+The stable source identity for a viewing-history row should be `source_sheet_name + source_row_number`. This identity should replace the previous source-row hash as the uniqueness contract for `viewing_history`. A row-content checksum can still be kept as an optional change-detection checksum, but it should not be the primary unique row identity.
+
+The rebuild path is intentionally split. Google Sheets plus the confirmed progress JSON first rebuilds `viewing_history` only, storing `douban_subject_id` directly on each watched row. It must not fetch Douban detail pages during this step. `viewing_history.movie_id` is nullable and should be treated as a backfilled local cache after `movies` rows exist.
 
 ### Candidate Movie Source
 
@@ -153,6 +157,8 @@ The first version expands only `Top250 -> one layer of recommendations`.
 Recommended subjects are queued and enriched, but their own recommendations are
 not recursively expanded.
 
+During movie-detail enrichment, the parser should also capture Douban "recommended from this subject" links and enqueue them into `candidate_subject_queue`. This applies both when rebuilding details for watched history movies and when processing Top250 candidates.
+
 ## Persistence
 
 ### PostgreSQL As System Of Record
@@ -171,6 +177,14 @@ PostgreSQL should store:
 - recommendation sessions and returned items
 - feedback events
 - wishlist state
+
+For the next database rebuild, `viewing_history` should be reconstructed from Google Sheets plus the existing auto-match progress JSON by matching sheet name and `source_row_number`. During the rebuild, all database tables except the two candidate tables, `candidate_subject_queue` and `candidate_pool`, may be cleared after explicit user approval. The `movies` table should then be reloaded from Douban subject detail pages referenced by viewing history, then expanded through candidate discovery. The `movies` schema should drop `display_title` and `original_title`; other metadata columns should remain unless the user approves a further schema change.
+
+When replaying the progress JSON, confirmed subject IDs should be selected by explicit priority: `manual_id_persisted` over `review_confirmed_persisted` over `auto_matched_persisted`. If the highest-priority confirmed entries for one source row disagree on subject ID, the row should be reported and skipped rather than guessed.
+
+After `viewing_history` is rebuilt, the movie rebuild job should read distinct `viewing_history.douban_subject_id` values that are missing from `movies`, fetch Douban detail pages, upsert canonical metadata into `movies`, backfill `viewing_history.movie_id`, and enqueue one-layer Douban recommendations into `candidate_subject_queue`.
+
+For incremental record-watched updates, the request should append to Google Sheets and upsert `viewing_history`. If `movies` already contains the watched subject, `movie_id` can be filled immediately. If not, the request should synchronously fetch that watched movie's Douban detail, write `movies`, and fill `viewing_history.movie_id`. Detail-page recommendations may be inserted into `candidate_subject_queue`, but recommended subjects should be turned into `movies` plus `candidate_pool` entries by the background queue processor, not by the synchronous record-watched request.
 
 ## Recommendation Strategy
 
@@ -218,8 +232,8 @@ Accepted stack:
 - Douban matching and metadata enrichment
 - PostgreSQL persistence
 - local candidate pool
-- on-demand API endpoint returning five recommendations
-- thin React frontend with five movie cards
+- on-demand API endpoint returning six recommendations
+- thin React frontend with six movie cards
 - want-to-watch, maybe-later, and not-interested feedback
 - wishlist
 - direct record-watched entry from wishlist

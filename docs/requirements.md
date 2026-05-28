@@ -13,7 +13,7 @@ Course-style reinforcement learning recommendation projects are references only.
 3. Enrich matched movies and candidate movies with metadata.
 4. Store cleaned history, candidates, feedback, and wishlist state in PostgreSQL.
 5. User clicks a recommendation action in the frontend.
-6. System returns exactly five unseen and non-wishlist movies.
+6. System returns exactly six unseen and non-wishlist movies.
 7. User marks each recommendation as want-to-watch, maybe-later, or not-interested.
 8. Want-to-watch movies enter the wishlist.
 9. When a wishlist movie is watched, the user records rating, quality, comment, and watched date.
@@ -68,9 +68,9 @@ Course-style reinforcement learning recommendation projects are references only.
 ### Recommendation Session
 
 - A session starts only when the user clicks the recommendation action.
-- Each session returns exactly five movies.
+- Each session returns exactly six movies.
 - The mix should be:
-  - three high-confidence candidates
+  - four high-confidence candidates
   - two exploratory or diversity candidates
 - Exclude movies already in viewing history.
 - Exclude movies already in wishlist.
@@ -151,8 +151,8 @@ The backend should support strategy switching for evaluation and debugging. The 
 MVP frontend pages:
 
 - recommendation page
-  - click to request five recommendations
-  - show five movie cards
+  - click to request six recommendations
+  - show six movie cards
   - capture want-to-watch, maybe-later, and not-interested feedback
 - wishlist page
   - list saved movies
