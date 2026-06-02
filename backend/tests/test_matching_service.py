@@ -547,6 +547,37 @@ class MatchingServiceTest(unittest.TestCase):
             [item.status for item in result.candidates],
         )
 
+    def test_cached_search_adapter_can_ignore_empty_cached_results(self) -> None:
+        candidate = ViewingHistoryCandidate(
+            source_raw_id="raw-1",
+            source_sheet_name="MOVIES.xlsx#2025",
+            source_row_number=3,
+            title="肖申克",
+            user_rating=4.0,
+        )
+        queue = build_douban_match_inputs([candidate])
+        cache = InMemoryDoubanSearchCache()
+        cache.set(queue.inputs[0], [])
+        inner = FakeDoubanSearchAdapter(
+            {
+                "肖申克": [
+                    DoubanSearchResult(
+                        subject_id="1292052",
+                        title="肖申克的救赎",
+                        year=1994,
+                    )
+                ]
+            }
+        )
+        adapter = CachedDoubanSearchAdapter(inner, cache, cache_empty_results=False)
+
+        result = run_search_match_job(queue.inputs, adapter)
+
+        self.assertEqual(1, len(inner.searches))
+        self.assertEqual(1, adapter.miss_count)
+        self.assertEqual(0, adapter.hit_count)
+        self.assertEqual("1292052", result.candidates[0].candidate_subject_id)
+
     def test_score_search_result_uses_title_and_year(self) -> None:
         queue = build_douban_match_inputs(
             [
@@ -632,6 +663,57 @@ class MatchingServiceTest(unittest.TestCase):
         self.assertEqual(1, len(results))
         self.assertEqual("2222996", results[0].subject_id)
         self.assertEqual("Still Walking", results[0].title)
+
+    def test_parse_douban_search_results_supports_current_movie_search_markup(self) -> None:
+        html = """
+        <div class="result">
+          <div class="pic">
+            <a class="nbg" href="https://www.douban.com/link2/?url=https%3A%2F%2Fmovie.douban.com%2Fsubject%2F1292052%2F"
+               onclick="moreurl(this,{sid: 1292052})" title="The Shawshank Redemption"><img src="poster.jpg"></a>
+          </div>
+          <div class="content">
+            <div class="title">
+              <h3>
+                <span>[电影]</span>
+                &nbsp;<a href="https://www.douban.com/link2/?url=https%3A%2F%2Fmovie.douban.com%2Fsubject%2F1292052%2F"
+                   onclick="moreurl(this,{sid: 1292052})">肖申克的救赎 </a>
+              </h3>
+              <div class="rating-info">
+                <span class="subject-cast">原名:The Shawshank Redemption / 弗兰克·德拉邦特 / 蒂姆·罗宾斯 / 1994</span>
+              </div>
+            </div>
+          </div>
+        </div>
+        """
+
+        results = parse_douban_search_results(html)
+
+        self.assertEqual(1, len(results))
+        self.assertEqual("1292052", results[0].subject_id)
+        self.assertEqual("肖申克的救赎 The Shawshank Redemption", results[0].title)
+        self.assertEqual(1994, results[0].year)
+        self.assertEqual("弗兰克·德拉邦特", results[0].director)
+
+    def test_parse_douban_search_results_applies_person_display_rule_when_original_name_exists(self) -> None:
+        html = """
+        <div class="result">
+          <div class="title">
+            <a href="https://movie.douban.com/subject/1/">Foreign Director Movie</a>
+          </div>
+          <span class="subject-cast">雷德利·斯科特 Ridley Scott / 1991</span>
+        </div>
+        <div class="result">
+          <div class="title">
+            <a href="https://movie.douban.com/subject/2/">Japanese Director Movie</a>
+          </div>
+          <span class="subject-cast">是枝裕和 Hirokazu Kore-eda / 2008</span>
+        </div>
+        """
+
+        results = parse_douban_search_results(html)
+
+        self.assertEqual("Ridley Scott", results[0].director)
+        self.assertEqual("是枝裕和", results[1].director)
 
     def test_file_search_cache_round_trips_results(self) -> None:
         candidate = ViewingHistoryCandidate(

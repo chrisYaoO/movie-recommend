@@ -26,6 +26,7 @@ class ViewingHistoryRecordServiceTest(unittest.TestCase):
             douban_rating=8.8,
             douban_vote_count=300000,
             url="https://movie.douban.com/subject/2222996/",
+            poster_url="https://img.example/p123456.webp",
         )
         sheets = _FakeSheets()
 
@@ -79,17 +80,18 @@ class ViewingHistoryRecordServiceTest(unittest.TestCase):
                 "1080p",
                 "quietly great",
                 "2222996",
-                "",
+                "123456",
             ],
             sheets.rows[0],
         )
 
-    def test_recording_existing_movie_backfills_movie_id_immediately(self) -> None:
+    def test_recording_existing_movie_uses_local_metadata_for_sheet_row(self) -> None:
         detail = DoubanMovieDetail(
             subject_id="2222996",
             title="Still Walking",
             year=2008,
-            directors=("Hirokazu Kore-eda",),
+            directors=("是枝裕和 Hirokazu Kore-eda",),
+            poster_url="https://img.example/p456789.webp",
             url="https://movie.douban.com/subject/2222996/",
         )
         sheets = _FakeSheets()
@@ -121,6 +123,20 @@ class ViewingHistoryRecordServiceTest(unittest.TestCase):
         self.assertEqual(0, result.recommendation_inserted_count)
         self.assertEqual(existing.id, history["movie_id"])
         self.assertEqual([], detail_adapter.fetches)
+        self.assertEqual(
+            [
+                "2026-05-26",
+                "Still Walking",
+                "是枝裕和",
+                2008,
+                4.5,
+                "",
+                "",
+                "2222996",
+                "456789",
+            ],
+            sheets.rows[0],
+        )
 
 
 class _FakeSheets:

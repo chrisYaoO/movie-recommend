@@ -2,12 +2,12 @@
 
 ## Purpose
 
-Plan the next frontend iteration for the existing thin React app. This document is ordered by implementation dependency:
+Plan the next frontend iteration for the existing thin React app. This slice now includes the previous Later Targets plus the newly confirmed requirements:
 
-1. Backend/API contracts that the frontend depends on.
-2. Shared frontend state and card components.
-3. Recommend, Add watched, Wishlist, and Not interested views.
-4. Later targets that should not block this slice.
+1. Fix card metadata contracts: source labels, original wishlist score/source, posters, and person formatting.
+2. Repair Add watched search, including direct Douban subject ID resolution.
+3. Improve recommendation refresh, maybe-later recency/downrank behavior, and debug controls.
+4. Add the requested UI polish: trash icons, Add watched single-column layout, Wishlist/Not interested filters.
 
 ## Execution Rules
 
@@ -18,8 +18,8 @@ Plan the next frontend iteration for the existing thin React app. This document 
 
 ## Confirmed Product Decisions
 
-- [x] Recommendation sessions return 6 cards.
-  - Mix: 4 exploit cards and 2 explore cards.
+- [x] Recommendation sessions return 8 cards.
+  - Mix: 4 exploit cards and 4 explore cards.
 - [x] Normal frontend strategy is fixed to `hybrid`.
   - Do not expose strategy controls in the primary UI.
 - [x] Recommendation score is displayed as a 100-point normalized UI score.
@@ -30,239 +30,278 @@ Plan the next frontend iteration for the existing thin React app. This document 
   - If `source_ref` starts with `top`, display that value directly, such as `top17`.
   - If `source_ref` is `recommended_from:{subject_id}`, display `Recommend from {movie title}`.
   - Do not show raw Douban subject IDs in normal card UI.
+- [x] `Recommend from unknown movie` is a backend source-label resolution bug.
+  - The frontend should not paper over normal recommendation-derived source labels.
+  - Backend should resolve `recommended_from:{subject_id}` to the source movie title from local data whenever possible.
+- [x] Wishlist card score/source shows the original recommendation context.
+  - Use the score and source fields persisted on the originating `recommendation_items` row.
+  - Do not recompute a current score for wishlist display.
+  - If no originating recommendation item exists, return null score/source fields and keep the card renderable.
+- [x] Movie cards should load real poster images when local metadata has `poster_url`.
+  - Missing posters use the existing stable placeholder.
+  - Poster loading is display-only; it must not call Douban live.
+- [x] Director and cast formatting should be cleaned up for card readability.
+  - Backend should return normalized arrays when available.
+  - Frontend should render compact human-readable text without mojibake separators.
+- [x] Search/Add watched should support both title search and direct Douban subject ID input.
+  - Direct ID input should resolve to a selectable movie candidate.
+  - If local metadata is missing, the watched-movie creation path may synchronously fetch the watched movie detail as already defined.
 - [x] `Not interested` is a main app tab beside Wishlist.
 - [x] Wishlist tab lists only active wishlist items.
   - Do not show removed or watched wishlist rows.
 - [x] Not interested tab lists only current effective `not_interested` movies.
   - Do not show historical `not_interested` movies that were later cleared.
-- [x] Wishlist and Not interested lists sort by current-state time descending for now.
-  - Filtering is a later target.
-- [x] Tabs and page state should restore after closing/reloading the frontend.
+- [x] Wishlist and Not interested filters are now in this slice.
+  - Filters should be lightweight client/API filters for finding items in longer lists, not a full analytics surface.
+- [x] Trash icons replace only remove-style actions.
+  - Wishlist trash icon keeps `removed_from_wishlist` semantics.
+  - Not interested trash icon keeps `clear_not_interested` semantics.
+  - Recommendation card `-` remains the `not_interested` feedback action for now.
+  - Use an accessible label/title on icon-only buttons.
+- [x] Add watched search uses a single-column flow above the record form.
+  - Search panel appears above candidate results and the record form.
+  - Desktop should not place search and form side-by-side.
+  - Handoff preselection, draft persistence, and source-tab return behavior remain unchanged.
+- [x] Formal Refresh is exposure-aware.
+  - It creates a new recommendation session.
+  - It omits a fixed explore seed.
+  - It excludes movies exposed in recent recommendation sessions by default.
+- [x] Debug recommendation mode has a narrow contract.
+  - It disables poster loading.
+  - It uses `exposure_cooldown_sessions=1`.
+  - It uses fixed `seed=42` so explore slots are stable during manual debug refresh.
+  - Debug controls may exist, but they should not clutter the normal recommendation workflow.
+- [x] Maybe-later needs short-term recency/downrank behavior in this slice.
+  - `maybe_later` remains a weak positive signal, not a hard negative.
+  - Repeated or recent maybe-later items should be less likely to reappear soon.
 
-## Backend/API Phase
+## Current Slice Scope
 
-### Recommendation Sessions
+The following items were previously listed as Later Targets and are now promoted into the current execution plan:
 
-- [ ] Return 6 recommendation items: 4 exploit and 2 explore.
-- [ ] Add/update tests for the 4 exploit plus 2 explore mix.
-- [ ] Add persisted processing state to `recommendation_items`.
-  - Suggested statuses: `watched`, `added_to_wishlist`, `not_interested`, `maybe_later`.
-  - Add `processing_status` and `processed_at`.
-  - Include processing status in recommendation API responses.
-- [ ] Add an API path to fetch an existing recommendation session by id.
-  - Suggested endpoint: `GET /recommendations/{session_id}`.
-  - Used by frontend reload restoration to sync the same session without generating new recommendations.
-- [ ] Expose recommendation item source label.
-  - Required UI field: `source_label`.
-  - `top{rank}` can be returned/displayed directly.
-  - `recommended_from:{subject_id}` must be resolved to `Recommend from {movie title}`.
-  - Raw `source_ref` may be exposed only as optional debug data.
+- [x] Load real poster images.
+- [x] Improve director and cast formatting.
+- [x] Repair movie search API.
+- [x] Support direct Douban subject ID input/resolution.
+- [x] Add maybe-later recency/downrank rules so repeatedly deferred movies are less likely to reappear soon.
+- [x] Add Wishlist and Not interested filters.
+- [x] Add a debug-only recommendation controls surface if repeated manual evaluation needs it.
 
-### Feedback And Candidate State
+## Recommended Execution Order
 
-- [ ] Treat feedback rows as append-only user-signal events.
-  - Do not mutate/delete old feedback events to represent later state changes.
-- [ ] Add feedback state-change types.
-  - `removed_from_wishlist`: active wishlist item was removed and downgraded to maybe-later semantics.
-  - `clear_not_interested`: current not-interested state was cleared.
-- [ ] Derive current effective movie state from the latest relevant feedback/state event.
-  - Do not exclude a movie only because it has any historical `not_interested` event.
-- [ ] `want_to_watch` behavior:
-  - Add or keep active wishlist row.
-  - Mark originating `recommendation_items.processing_status = added_to_wishlist`.
-  - Do not deactivate candidate-pool rows; active wishlist state is the exclusion mechanism.
-- [ ] `not_interested` behavior:
-  - Append `not_interested` feedback.
-  - Mark originating `recommendation_items.processing_status = not_interested`.
-  - Mark active candidate-pool rows for the movie inactive.
-- [ ] `maybe_later` behavior:
-  - Append `maybe_later` feedback.
-  - Mark originating `recommendation_items.processing_status = maybe_later`.
-  - Do not deactivate candidate-pool rows in this slice.
-- [ ] `clear_not_interested` behavior:
-  - Append `clear_not_interested`.
-  - Restore `candidate_pool.active=true` only if the movie is not watched and not in active wishlist.
+### Section 1: Backend Card Metadata Contract
 
-### Watched Recording
+Why first: Recommend, Wishlist, and Not interested cards all depend on one consistent movie-card response shape.
 
-- [ ] Any successful watched-history write should make active candidate-pool rows for that movie inactive.
-- [ ] From a recommendation card:
-  - Add watched submission carries `session_id` and `recommendation_item_id`.
-  - Backend writes viewing history.
-  - Backend marks originating `recommendation_items.processing_status = watched`.
-  - Backend marks active candidate-pool rows for the movie inactive.
-  - Response includes enough information for the frontend to mark the originating card processed.
-  - Do not store recommendation processing status on `viewing_history`.
-- [ ] From a wishlist card:
-  - Backend writes viewing history.
-  - Backend closes/removes the active wishlist item.
-  - Backend marks active candidate-pool rows for the movie inactive.
+- [x] Fix `Recommend from unknown movie` at the data/API boundary.
+  - `recommended_from:{subject_id}` should resolve to `Recommend from {source movie title}` when the source movie exists in `movies`.
+  - Existing candidate rows with missing `source_label` should still render a title if the source movie can be found by subject ID.
+  - Keep `Recommend from unknown movie` only as a last-resort debug fallback, not normal UI output.
+- [x] Add a repair/backfill path for existing candidate source labels.
+  - Backfill `candidate_pool.source_label` or queue-derived source labels from `movies.title`.
+  - Do not require re-crawling Douban just to repair labels when the source movie already exists locally.
+- [x] Expose poster and normalized person fields in movie-card API responses.
+  - Include `poster_url` when stored on `movies`.
+  - Return director/cast in a shape the frontend can render cleanly.
+  - Preserve existing scalar fields during transition so current UI does not break.
+- [x] Extend wishlist API responses with original recommendation display fields.
+  - Required fields: `score`, `source_ref`, and `source_label`.
+  - Source is the originating `recommendation_items` row matched by `wishlist.source_session_id + wishlist.movie_id`.
+  - If no originating recommendation item can be found, return null values rather than inventing a score.
+  - Preserve current active-wishlist filtering and pagination.
+- [x] Add focused backend tests.
+  - Top-list source returns `top{rank}`.
+  - Recommendation-derived source with stored label returns `Recommend from {title}`.
+  - Recommendation-derived source without stored label resolves through the source subject movie.
+  - Missing source movie falls back safely without crashing.
+  - Movie response includes poster/person fields when metadata exists.
+  - Wishlist item created from a recommendation carries that recommendation's score and source label.
+  - Wishlist item without recommendation context remains renderable.
+- [x] Section verification:
+  - Run focused backend tests for source-label, movie-card metadata, and wishlist response behavior.
 
-### Wishlist API
+### Section 2: Search And Direct Douban ID API
 
-- [ ] `GET /wishlist` returns only active wishlist items.
-  - Sort by current-state time descending.
-  - Support pagination, 10 rows per page.
-- [ ] Add wishlist remove endpoint if missing.
-  - Semantics: close/remove active wishlist item.
-  - Append `removed_from_wishlist` state-change feedback.
-  - Do not mark as `not_interested`.
+Why second: Add watched layout changes are only useful if search and direct ID resolution are reliable.
 
-### Not Interested API
+- [x] Repair movie search API behavior.
+  - Search should return useful candidates for normal title input.
+  - Search should not fail silently or return malformed candidate rows.
+  - Response shape should stay compatible with the current Add watched candidate selector.
+- [x] Support direct Douban subject ID input/resolution.
+  - Detect subject IDs from plain IDs and Douban subject URLs.
+  - Return an existing local movie when the subject ID already exists in `movies`.
+  - If the movie does not exist locally, use the existing watched-movie detail creation path rather than adding a second enrichment path.
+- [x] Add focused backend tests.
+  - Title search returns candidate rows with `subject_id`, `title`, `year`, `director`, and `url`.
+  - Plain Douban subject ID resolves.
+  - Douban subject URL resolves.
+  - Missing local metadata path returns a safe selectable candidate or a clear error that the frontend can show.
+- [x] Section verification:
+  - Run focused backend tests for movie search and direct ID resolution.
 
-- [ ] Add not-interested list endpoint.
-  - Return only movies whose current effective state is `not_interested`.
-  - Sort by current-state time descending.
-  - Support pagination, 10 rows per page.
-- [ ] Add not-interested remove endpoint.
-  - Semantics: append `clear_not_interested`.
-  - Do not mutate/delete the original `not_interested` event.
-  - Restore candidate-pool active state only when otherwise eligible.
+### Section 3: Backend Recommendation Controls
 
-### Search/Add Watched API
+Why third: Refresh, debug reproducibility, and maybe-later downrank all affect recommendation serving semantics.
 
-- [ ] Keep movie search API repair as a later backend/API target.
-- [ ] Support direct Douban subject ID input/resolution as a later target.
+- [x] Add API support for session-based exposure cooldown.
+  - Suggested endpoint shape: `GET /recommendations?strategy=hybrid&exposure_cooldown_sessions=5`.
+  - The cooldown excludes movie IDs shown in the most recent N recommendation sessions.
+  - Default production value: `5`.
+  - Debug value: explicit, usually `1`.
+  - Debug may also set `0` to inspect pure deterministic ranking.
+- [x] Keep seed behavior explicit.
+  - `seed` controls reproducible explore sampling.
+  - Production Refresh does not send `seed`.
+  - The current frontend debug mode sends fixed `seed=42`; explicit seed controls can be added later if manual reproducibility needs more than two-batch rotation.
+- [x] Apply cooldown after hard eligibility filters.
+  - Hard exclusions remain watched history, active wishlist, and current effective `not_interested`.
+  - Exposure cooldown is a soft freshness filter, not permanent negative feedback.
+- [x] Add fallback relaxation when fewer than 8 candidates remain.
+  - First relax exposure cooldown until at least 8 candidates are available.
+  - Do not relax watched, active wishlist, or current effective `not_interested`.
+  - Return enough debug metadata to explain when cooldown was relaxed.
+- [x] Add maybe-later recency/downrank behavior.
+  - Recent `maybe_later` should downrank or temporarily suppress a movie.
+  - Repeated `maybe_later` should apply stronger downrank than a single event.
+  - `removed_from_wishlist` keeps maybe-later semantics.
+  - Maybe-later must not deactivate candidate-pool rows in this slice.
+- [x] Preserve the existing 4 exploit plus 4 explore mix after cooldown and maybe-later adjustments.
+  - Exploit slots come from the highest-scoring remaining candidates after penalties/filters.
+  - Explore slots use quality-bounded weighted sampling from the remaining explore pool.
+- [x] Add focused backend tests.
+  - New sessions are persisted on each recommendation request.
+  - Production cooldown prevents recent exposed movies from immediately reappearing.
+  - Cooldown relaxation happens only when the remaining candidate count is too small.
+  - Fixed seed plus fixed cooldown is reproducible.
+  - Recent/repeated maybe-later lowers reappearance likelihood without becoming a hard negative.
+- [x] Section verification:
+  - Run focused backend tests for recommendation cooldown, debug seed behavior, and maybe-later downrank.
 
-## Frontend Phase
+### Section 4: Shared Movie Card UI
 
-### App State
+Why fourth: card UI should consume the fixed backend contracts before adding filters and debug controls.
 
-- [ ] Persist active tab in localStorage.
-- [ ] Preserve tab state when switching tabs.
-- [ ] Restore page state after closing/reloading the frontend.
-- [ ] Recommend reload behavior:
-  - If a cached current recommendation session exists, render it first.
-  - Background-sync the same session from backend using `GET /recommendations/{session_id}`.
-  - Do not generate a new recommendation session during restoration.
-  - If no cached session exists, load hybrid recommendations with `seed=42`.
-- [ ] Refresh behavior:
-  - Refresh button loads a new recommendation session.
-  - Current debug seed: `24`.
-  - Future behavior: random seed.
-  - Refresh success replaces the current recommendation session cache.
-  - Older backend sessions remain historical but are not restored as the current UI session.
-- [ ] Wishlist and Not interested reload behavior:
-  - Render local cached list first.
-  - Background-sync the first page or current visible range.
-
-### Shared Movie Card
-
-- [ ] Reuse one shared card across Recommend, Wishlist, and Not interested views.
-- [ ] Top-left badge shows slot/source tag, not rank.
-  - Recommendation cards: `Explore` or `Exploit`.
-- [ ] Top-right shows Douban rating.
-- [ ] Reserve a stable poster/image area above the title.
-  - Placeholder only in this slice.
-  - Real poster loading is a later target.
-- [ ] Movie title links to Douban URL.
-- [ ] Remove the separate Douban link row.
-- [ ] Keep year, director, and cast visible for now.
-  - Director/cast formatting is a later target.
-- [ ] Under cast, show left-side score: `Score: {normalized_score}`.
-- [ ] To the right of score, show source label.
-  - Top sources: `top{rank}`.
-  - Recommendation-derived sources: `Recommend from {movie title}`.
-- [ ] Hide button row by default.
-- [ ] Show button row on card hover/focus.
-- [ ] Processed cards stay visible.
+- [x] Keep one shared card across Recommend, Wishlist, and Not interested views.
+- [x] Load real poster images.
+  - Use `poster_url` when available.
+  - Keep stable dimensions so images do not shift card layout.
+  - Fall back to the existing placeholder when missing or failed.
+- [x] Improve director and cast formatting.
+  - Render clean comma-separated director/cast text.
+  - Avoid mojibake separators and overly long unwrapped rows.
+  - Keep title, year, rating, score, and source visible.
+- [x] Show score and source consistently wherever API data exists.
+  - Recommendation cards always show normalized score and source label.
+  - Wishlist cards show normalized score and source label when originating recommendation metadata exists.
+  - Missing score/source fields should leave the row clean, not show placeholder clutter.
+- [x] Replace text `Remove` actions with trash icon buttons.
+  - Applies to Wishlist remove and Not interested remove.
+  - Recommendation card `-` remains the `not_interested` feedback action.
+  - Use a familiar trash/delete icon.
+  - Include accessible label or title text such as `Remove`.
+  - Keep button sizing stable in hover/focus action rows.
+- [x] Keep processed-card behavior unchanged.
+  - Processed recommendation cards stay visible.
   - Use muted/greyed styling or lower opacity.
-  - Show status text: `Watched`, `Added to wishlist`, `Not interested`, or `Maybe later`.
   - Disable/hide actions that no longer apply.
   - Do not auto-refresh recommendations because a card was processed.
+- [x] Section verification:
+  - Run frontend build.
+  - Browser-check Recommend card poster/source/person formatting.
+  - Browser-check Wishlist score/source rendering.
+  - Browser-check Wishlist and Not interested trash buttons preserve current semantics.
 
-### Recommend View
+### Section 5: Add Watched Search And Layout UI
 
-- [ ] Remove top title/introduction block:
-  - `Movie Recommender`
-  - `Local recommendations and viewing history.`
-- [ ] Remove manual seed input.
-- [ ] Remove manual "Recommend" flow.
-- [ ] Show 6 recommendation cards.
-- [ ] Add Refresh button at the recommendation panel top-right.
-- [ ] Recommendation button row labels:
-  - `Watched`
-  - `+`
-  - `-`
-  - `Later`
-- [ ] Recommendation button behavior:
-  - `Watched`: switch to Add watched, preselect movie, preserve originating `session_id` and `recommendation_item_id`.
-  - `+`: submit `want_to_watch`, mark card `Added to wishlist`.
-  - `-`: submit `not_interested`, mark card `Not interested`.
-  - `Later`: submit `maybe_later`, mark card `Maybe later`.
+Why fifth: the backend search contract should be stable before changing the Add watched interaction.
 
-### Add Watched View And Form
-
-- [ ] When opened from Recommend or Wishlist, preselect the movie.
-- [ ] Keep search area visible and usable after preselection.
+- [x] Move search above the record form.
+  - Search area should span full width above the form.
+  - Search and form should not be side-by-side on desktop.
+  - Candidate results can remain directly under the search bar.
+- [x] Keep preselection behavior.
+  - When opened from Recommend or Wishlist, preselect the movie.
+  - Keep search area visible and usable after preselection.
   - User can search again and choose a different movie if the handoff was wrong.
-- [ ] Remove the visible `Movie` label text from the search toolbar.
-- [ ] Change `Quality` from free text to options:
-  - `1080p`
-  - `4K`
-  - `Other`
-- [ ] When `Other` is selected, show a custom quality input.
-  - Submit only the custom text.
-  - Do not prefix the submitted value with `Other`.
-- [ ] Remove the visible `Sheet` input.
-- [ ] Derive submitted `sheet` from watched date year.
-  - Example: `2026-05-28` submits `sheet=2026`.
-- [ ] Restrict rating to `0` through `5`.
-- [ ] Rating step is `0.1`.
-- [ ] Preserve draft on submit failure, tab switch, close, or reload.
-  - Use localStorage-backed draft state.
-  - Persist selected movie with form fields.
-  - Selected movie draft fields: `subject_id`, `title`, `year`, `director`, `url`.
-- [ ] On successful submit:
-  - Clear localStorage draft.
-  - Reset selected movie, query, candidates, and form values to defaults.
-  - If opened from another tab, return to that source tab.
-  - If opened directly from Add watched, stay on Add watched.
+- [x] Support direct Douban subject ID and URL in the Add watched search input.
+  - The same input accepts title, plain subject ID, or Douban subject URL.
+  - Display clear status when an ID cannot be resolved.
+- [x] Keep existing form behavior.
+  - Quality options remain `1080p`, `4K`, `Other`.
+  - `Other` submits only custom text.
+  - Sheet remains derived from watched date year.
+  - Draft persists and clears only after successful submit.
+  - Successful submit returns to the source tab when opened from another tab.
+- [x] Section verification:
+  - Run frontend build.
+  - Browser-check Add watched search appears above the form.
+  - Browser-check title search, direct subject ID, and Douban subject URL flows.
+  - Browser-check handoff preselection still works from Recommend and Wishlist.
 
-### Wishlist View
+### Section 6: Wishlist And Not Interested Filters
 
-- [ ] Reuse shared movie card.
-- [ ] Show only active wishlist items.
-- [ ] Move Refresh button to the top-right.
-- [ ] Remove current standalone wishlist card markup.
-- [ ] Button labels:
-  - `Watched`
-  - `Remove`
-- [ ] `Watched` switches to Add watched and preselects the wishlist movie.
-- [ ] `Remove` closes/removes active wishlist item and records `removed_from_wishlist`.
-- [ ] Load at most 10 rows at a time.
-- [ ] Load next page when scrolling near the bottom.
+Why sixth: filters are useful only after card metadata and list rendering are stable.
 
-### Not Interested View
+- [x] Add Wishlist filters.
+  - Start with a compact text filter over visible/listed movie title, year, director, and cast.
+  - Keep active-wishlist-only semantics.
+  - Preserve pagination/infinite-load behavior.
+- [x] Add Not interested filters.
+  - Start with a compact text filter over visible/listed movie title, year, director, and cast.
+  - Keep current effective not-interested semantics.
+  - Preserve pagination/infinite-load behavior.
+- [x] Avoid making a full analytics/search dashboard.
+  - Filters are for quickly finding list items, not recommendation analysis.
+- [x] Section verification:
+  - Run frontend build.
+  - Browser-check Wishlist filter on a multi-item list.
+  - Browser-check Not interested filter on a multi-item list.
 
-- [ ] Add `Not interested` tab.
-- [ ] Show only current effective not-interested movies.
-- [ ] Reuse shared movie card.
-- [ ] Show only one action: remove from not interested.
-- [ ] Remove action appends `clear_not_interested`.
-- [ ] Load at most 10 rows at a time.
-- [ ] Load next page when scrolling near the bottom.
+### Section 7: Frontend Recommendation Refresh And Debug Controls
+
+Why seventh: the frontend should switch Refresh/debug behavior only after backend recommendation controls exist.
+
+- [x] Replace temporary refresh seed behavior.
+  - Current temporary behavior: Refresh uses fixed debug seed `24`.
+  - Production behavior: Refresh requests a new session with no `seed` and the backend default exposure cooldown.
+- [x] Add a debug-only recommendation controls surface.
+  - Current debug behavior is a single toggle.
+  - Debug mode disables poster loading and sends `exposure_cooldown_sessions=1&seed=42`.
+  - Do not add visible strategy controls to the normal frontend.
+- [x] Keep restore behavior unchanged.
+  - Reload with cached current session fetches `GET /recommendations/{session_id}`.
+  - Restore must not generate a new recommendation session.
+  - Refresh success replaces the current recommendation session cache.
+- [x] Section verification:
+  - Run frontend build.
+  - Browser-check restore with cached recommendation session does not generate a new session.
+  - Browser-check production Refresh creates a new session without fixed seed.
+  - Browser-check production Refresh does not immediately repeat movies exposed in the recent cooldown window.
+  - Browser-check debug requests use `exposure_cooldown_sessions=1&seed=42` and do not load poster images.
 
 ## Later Targets
 
-- [ ] Randomize Refresh seed after debug phase.
-- [ ] Load real poster images.
-- [ ] Improve director and cast formatting.
-- [ ] Repair movie search API.
-- [ ] Support direct Douban subject ID input/resolution.
-- [ ] Add maybe-later recency/downrank rules so repeatedly deferred movies are less likely to reappear soon.
-- [ ] Add Wishlist and Not interested filters.
+- [ ] Tune poster loading polish after real use.
+- [ ] Add richer recommendation explanations/debug panels beyond the current debug mode.
+- [ ] Add advanced Wishlist and Not interested filters if simple text filtering is not enough.
+- [ ] Add longer-term maybe-later learning once enough interaction data exists.
+- [ ] Repair existing bad person metadata in `movies.directors`, starting with pure-English director rows such as `疯狂的石头` / `1862151` where Douban detail metadata should preserve the local-language name.
 
-## Verification
+## Final Verification
 
-- [ ] Run focused backend tests for changed recommendation/API behavior.
-- [ ] Run frontend build.
-- [ ] Browser-check:
-  - Recommend initial load with no cache uses `seed=42`.
-  - Recommend restore with cache does not generate a new session.
-  - Refresh replaces current session cache.
-  - Processed recommendation cards stay muted after reload.
-  - Add watched handoff works from Recommend and Wishlist.
-  - Add watched draft survives reload and clears after success.
-  - Wishlist shows active items only and paginates by 10.
-  - Not interested shows current effective negative items only and paginates by 10.
+- [x] Run focused backend tests for all changed recommendation/API behavior.
+- [x] Run frontend build.
+- [x] Browser-check full integrated flow:
+  - Recommendation-derived cards show `Recommend from {movie title}`, not `Recommend from unknown movie`, when source movie data exists.
+  - Cards show real posters when `poster_url` exists and fall back cleanly when missing.
+  - Director and cast formatting is readable.
+  - Wishlist cards show score/source when originating recommendation data exists.
+  - Wishlist remove uses a trash icon and still records removed-from-wishlist semantics.
+  - Not interested remove uses a trash icon and still clears current not-interested state.
+  - Add watched search appears above the form and supports title, subject ID, and Douban URL input.
+  - Wishlist and Not interested filters narrow visible/listed rows without changing state semantics.
+  - Restore with cached recommendation session does not generate a new session.
+  - Production Refresh creates a new session without fixed seed.
+  - Production Refresh does not immediately repeat movies exposed in the recent cooldown window.
+  - Debug request uses `exposure_cooldown_sessions=1&seed=42` and does not load poster images.

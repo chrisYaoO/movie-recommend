@@ -109,7 +109,7 @@ class MetadataServiceTest(unittest.TestCase):
 
         self.assertEqual("Still Walking", detail.title)
         self.assertEqual(2008, detail.year)
-        self.assertEqual(("Ridley Scott",), detail.directors)
+        self.assertEqual(("闆峰痉鍒┞锋柉绉戠壒 Ridley Scott",), detail.directors)
         self.assertEqual(("Hiroshi Abe",), detail.actors)
         self.assertEqual(("Drama", "Family"), detail.genres)
         self.assertEqual(8.8, detail.douban_rating)
@@ -139,6 +139,24 @@ class MetadataServiceTest(unittest.TestCase):
         self.assertEqual("The Shawshank Redemption", detail.original_title)
         self.assertEqual(("月黑高飞", "刺激1995"), detail.aka_titles)
 
+    def test_parse_douban_movie_detail_preserves_complete_json_ld_director_name(self) -> None:
+        html = """
+        <html>
+          <head>
+            <script type="application/ld+json">
+              {"name":"続・続・最後から二番目の恋","director":{"name":"楢木野礼 Aya Narakino"}}
+            </script>
+          </head>
+          <body>
+            <a rel="v:directedBy">楢木野礼</a>
+          </body>
+        </html>
+        """
+
+        detail = parse_douban_movie_detail("36961958", html)
+
+        self.assertEqual(("楢木野礼 Aya Narakino",), detail.directors)
+
     def test_http_detail_adapter_fetches_desktop_subject_page(self) -> None:
         html = """
         <html>
@@ -155,7 +173,7 @@ class MetadataServiceTest(unittest.TestCase):
 
         request = urlopen.call_args.args[0]
         self.assertEqual("https://movie.douban.com/subject/2222996/", request.full_url)
-        self.assertEqual(("Ridley Scott",), detail.directors)
+        self.assertEqual(("闆峰痉鍒┞锋柉绉戠壒 Ridley Scott",), detail.directors)
 
     def test_selenium_detail_adapter_fetches_desktop_page_and_parses_json_ld(self) -> None:
         html = """
@@ -188,7 +206,7 @@ class MetadataServiceTest(unittest.TestCase):
         self.assertEqual(12, driver.page_load_timeout)
         self.assertEqual("Thelma & Louise", detail.title)
         self.assertEqual(1991, detail.year)
-        self.assertEqual(("Ridley Scott",), detail.directors)
+        self.assertEqual(("闆峰痉鍒┞锋柉绉戠壒 Ridley Scott",), detail.directors)
         self.assertEqual(("Geena Davis",), detail.actors)
         self.assertEqual(("鍓ф儏", "鎯婃倸", "鐘姜"), detail.genres)
         self.assertEqual(9.0, detail.douban_rating)

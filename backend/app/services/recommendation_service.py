@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+from contextlib import nullcontext
 from dataclasses import asdict, dataclass
 from datetime import date, datetime, timezone
 import json
 import os
 import random
+from threading import RLock
 from typing import Any, Literal, Protocol
 
 from backend.app.config import load_local_env
@@ -13,6 +15,7 @@ from backend.app.models.domain import (
     FeedbackType,
     Movie,
     RecommendationItem,
+    RecommendationProcessingStatus,
     RecommendationSession,
     SlotType,
     ViewingHistory,
@@ -21,10 +24,38 @@ from backend.app.models.domain import (
 )
 from backend.app.recommenders.simple import content_score, diversity_gain, hybrid_score, popularity_score
 from backend.app.services.catalog import seed_history, seed_movies
+from backend.app.services.display_text import display_person_names
 
 load_local_env()
 
 Strategy = Literal["popularity", "content", "hybrid"]
+EXPLOIT_SLOT_COUNT = 4
+EXPLORE_SLOT_COUNT = 4
+RECOMMENDATION_SESSION_SIZE = EXPLOIT_SLOT_COUNT + EXPLORE_SLOT_COUNT
+
+
+def _current_release_year_limit() -> int:
+    return date.today().year
+
+
+def _is_future_release_year(year: int | None) -> bool:
+    return bool(year) and year > _current_release_year_limit()
+
+
+@dataclass
+class RecommendationCandidate:
+    movie: Movie
+    source_ref: str | None = None
+    source_label: str | None = None
+
+
+@dataclass
+class NotInterestedItem:
+    movie: Movie
+    state_event_id: str
+    state_changed_at: datetime
+    session_id: str
+    item_id: str
 
 
 @dataclass
@@ -44,8 +75,9 @@ class RecordWatchedRequest:
 class MovieRepository(Protocol):
     movies_by_id: dict[str, Movie]
     history: list[ViewingHistory]
+    feedback: list[Feedback]
 
-    def active_candidates(self) -> list[Movie]: ...
+    def active_candidates(self) -> list[RecommendationCandidate]: ...
 
     def save_session(self, session: RecommendationSession) -> RecommendationSession: ...
 
@@ -55,36 +87,63 @@ class MovieRepository(Protocol):
 
     def add_to_wishlist(self, movie: Movie, session_id: str) -> WishlistItem: ...
 
+    def mark_recommendation_item_processed(
+        self,
+        session_id: str,
+        item_id: str,
+        status: RecommendationProcessingStatus,
+    ) -> RecommendationItem: ...
+
+    def deactivate_candidate_pool_movie(self, movie_id: str) -> None: ...
+
+    def restore_candidate_pool_movie_if_eligible(self, movie_id: str) -> None: ...
+
     def list_active_wishlist(self) -> list[WishlistItem]: ...
 
     def find_wishlist_item(self, wishlist_id: str) -> WishlistItem | None: ...
 
     def mark_wishlist_watched(self, wishlist_item: WishlistItem) -> WishlistItem: ...
 
+    def remove_wishlist_item(self, wishlist_item: WishlistItem) -> WishlistItem: ...
+
     def add_viewing_history(self, history: ViewingHistory, wishlist_id: str) -> ViewingHistory: ...
+
+    def list_current_not_interested(self) -> list[NotInterestedItem]: ...
+
+    def find_recommendation_item_by_session_and_movie(
+        self,
+        session_id: str,
+        movie_id: str,
+    ) -> RecommendationItem | None: ...
+
+    def recent_recommendation_movie_ids(self, session_count: int) -> set[str]: ...
 
 
 class InMemoryMovieRepository:
     def __init__(self, movies: list[Movie] | None = None, history: list[ViewingHistory] | None = None) -> None:
         self.movies_by_id = {movie.id: movie for movie in movies or seed_movies()}
-        self.candidate_pool = set(self.movies_by_id)
+        self.candidate_pool = {
+            movie.id: RecommendationCandidate(movie=movie, source_ref=f"top{index}")
+            for index, movie in enumerate(self.movies_by_id.values(), start=1)
+        }
         self.history = list(history or seed_history())
         self.sessions: dict[str, RecommendationSession] = {}
         self.feedback: list[Feedback] = []
         self.wishlist: dict[str, WishlistItem] = {}
 
-    def active_candidates(self) -> list[Movie]:
+    def active_candidates(self) -> list[RecommendationCandidate]:
         watched_movie_ids = {item.movie_id for item in self.history}
         active_wishlist_movie_ids = {
             item.movie.id for item in self.wishlist.values() if item.status == WishlistStatus.ACTIVE
         }
         return [
-            movie
-            for movie_id, movie in self.movies_by_id.items()
+            self.candidate_pool[movie_id]
+            for movie_id in self.movies_by_id
             if movie_id in self.candidate_pool
+            and not _is_future_release_year(self.candidate_pool[movie_id].movie.year)
             and movie_id not in watched_movie_ids
             and movie_id not in active_wishlist_movie_ids
-            and not self._has_hard_negative(movie_id)
+            and self._current_feedback_state(movie_id) != FeedbackType.NOT_INTERESTED
         ]
 
     def save_session(self, session: RecommendationSession) -> RecommendationSession:
@@ -94,9 +153,45 @@ class InMemoryMovieRepository:
     def get_session(self, session_id: str) -> RecommendationSession | None:
         return self.sessions.get(session_id)
 
+    def recent_recommendation_movie_ids(self, session_count: int) -> set[str]:
+        if session_count <= 0:
+            return set()
+        recent_sessions = sorted(
+            self.sessions.values(),
+            key=lambda session: session.created_at,
+            reverse=True,
+        )[:session_count]
+        return {item.movie.id for session in recent_sessions for item in session.items}
+
     def add_feedback(self, feedback: Feedback) -> Feedback:
         self.feedback.append(feedback)
         return feedback
+
+    def mark_recommendation_item_processed(
+        self,
+        session_id: str,
+        item_id: str,
+        status: RecommendationProcessingStatus,
+    ) -> RecommendationItem:
+        session = self.sessions[session_id]
+        item = next(candidate for candidate in session.items if candidate.id == item_id)
+        item.processing_status = status
+        item.processed_at = datetime.now(timezone.utc)
+        return item
+
+    def deactivate_candidate_pool_movie(self, movie_id: str) -> None:
+        self.candidate_pool.pop(movie_id, None)
+
+    def restore_candidate_pool_movie_if_eligible(self, movie_id: str) -> None:
+        if movie_id in self.candidate_pool:
+            return
+        if any(item.movie_id == movie_id for item in self.history):
+            return
+        if self.find_active_wishlist_by_movie(movie_id) is not None:
+            return
+        movie = self.movies_by_id.get(movie_id)
+        if movie is not None:
+            self.candidate_pool[movie_id] = RecommendationCandidate(movie=movie)
 
     def add_to_wishlist(self, movie: Movie, session_id: str) -> WishlistItem:
         existing = self.find_active_wishlist_by_movie(movie.id)
@@ -113,7 +208,11 @@ class InMemoryMovieRepository:
         )
 
     def list_active_wishlist(self) -> list[WishlistItem]:
-        return [item for item in self.wishlist.values() if item.status == WishlistStatus.ACTIVE]
+        return sorted(
+            [item for item in self.wishlist.values() if item.status == WishlistStatus.ACTIVE],
+            key=lambda item: item.created_at,
+            reverse=True,
+        )
 
     def find_wishlist_item(self, wishlist_id: str) -> WishlistItem | None:
         return self.wishlist.get(wishlist_id)
@@ -123,12 +222,57 @@ class InMemoryMovieRepository:
         wishlist_item.closed_at = datetime.now(timezone.utc)
         return wishlist_item
 
+    def remove_wishlist_item(self, wishlist_item: WishlistItem) -> WishlistItem:
+        wishlist_item.status = WishlistStatus.REMOVED
+        wishlist_item.closed_at = datetime.now(timezone.utc)
+        return wishlist_item
+
     def add_viewing_history(self, history: ViewingHistory, wishlist_id: str) -> ViewingHistory:
         self.history.append(history)
         return history
 
-    def _has_hard_negative(self, movie_id: str) -> bool:
-        return any(item.movie_id == movie_id and item.feedback_type == FeedbackType.NOT_INTERESTED for item in self.feedback)
+    def list_current_not_interested(self) -> list[NotInterestedItem]:
+        latest_by_movie = self._latest_state_feedback_by_movie()
+        items = [
+            NotInterestedItem(
+                movie=self.movies_by_id[feedback.movie_id],
+                state_event_id=feedback.id,
+                state_changed_at=feedback.created_at,
+                session_id=feedback.session_id,
+                item_id=feedback.item_id,
+            )
+            for feedback in latest_by_movie.values()
+            if feedback.feedback_type == FeedbackType.NOT_INTERESTED and feedback.movie_id in self.movies_by_id
+        ]
+        return sorted(items, key=lambda item: item.state_changed_at, reverse=True)
+
+    def find_recommendation_item_by_session_and_movie(
+        self,
+        session_id: str,
+        movie_id: str,
+    ) -> RecommendationItem | None:
+        session = self.sessions.get(session_id)
+        if session is None:
+            return None
+        return next((item for item in session.items if item.movie.id == movie_id), None)
+
+    def _current_feedback_state(self, movie_id: str) -> FeedbackType | None:
+        latest = self._latest_state_feedback_by_movie().get(movie_id)
+        return latest.feedback_type if latest else None
+
+    def _latest_state_feedback_by_movie(self) -> dict[str, Feedback]:
+        state_events = {
+            FeedbackType.WANT_TO_WATCH,
+            FeedbackType.MAYBE_LATER,
+            FeedbackType.NOT_INTERESTED,
+            FeedbackType.REMOVED_FROM_WISHLIST,
+            FeedbackType.CLEAR_NOT_INTERESTED,
+        }
+        latest: dict[str, Feedback] = {}
+        for item in self.feedback:
+            if item.feedback_type in state_events:
+                latest[item.movie_id] = item
+        return latest
 
 
 class PostgresRecommendationRepository:
@@ -143,23 +287,25 @@ class PostgresRecommendationRepository:
         self.sessions: dict[str, RecommendationSession] = {}
         self.feedback: list[Feedback] = []
         self.wishlist: dict[str, WishlistItem] = {}
+        self.lock = RLock()
         self._active_candidate_movie_ids: set[str] = set()
+        self._active_candidate_sources: dict[str, tuple[str | None, str | None]] = {}
         self._initialize_interaction_schema()
 
     def close(self) -> None:
         self.connection.close()
 
-    def active_candidates(self) -> list[Movie]:
+    def active_candidates(self) -> list[RecommendationCandidate]:
         self.refresh()
         active_wishlist_movie_ids = {
             item.movie.id for item in self.wishlist.values() if item.status == WishlistStatus.ACTIVE
         }
         return [
-            movie
+            self._candidate_from_movie(movie)
             for movie_id, movie in self.movies_by_id.items()
             if movie_id in self._active_candidate_movie_ids
             and movie_id not in active_wishlist_movie_ids
-            and not self._has_hard_negative(movie_id)
+            and self._current_feedback_state(movie_id) != FeedbackType.NOT_INTERESTED
         ]
 
     def refresh(self) -> None:
@@ -176,7 +322,8 @@ class PostgresRecommendationRepository:
                 genres,
                 countries,
                 douban_rating,
-                douban_vote_count
+                douban_vote_count,
+                poster_url
             FROM movies
             """
         ).fetchall()
@@ -204,17 +351,41 @@ class PostgresRecommendationRepository:
 
         candidate_rows = self.connection.execute(
             """
-            SELECT DISTINCT cp.movie_id
+            SELECT DISTINCT ON (cp.movie_id)
+                cp.movie_id,
+                cp.source_ref,
+                COALESCE(
+                    cp.source_label,
+                    CASE
+                        WHEN cp.source_ref LIKE %s AND source_movie.title IS NOT NULL
+                        THEN 'recommended from ' || source_movie.title
+                        ELSE NULL
+                    END
+                ) AS source_label
             FROM candidate_pool cp
+            JOIN movies candidate_movie
+                ON candidate_movie.id = cp.movie_id
+            LEFT JOIN movies source_movie
+                ON source_movie.douban_subject_id = split_part(cp.source_ref, ':', 2)
             WHERE cp.active = TRUE
+              AND (candidate_movie.year IS NULL OR candidate_movie.year <= %s)
               AND NOT EXISTS (
                   SELECT 1
                   FROM viewing_history vh
                   WHERE vh.movie_id = cp.movie_id
               )
-            """
+            ORDER BY cp.movie_id, cp.updated_at DESC, cp.created_at DESC
+            """,
+            ("recommended_from:%", _current_release_year_limit()),
         ).fetchall()
         self._active_candidate_movie_ids = {str(row["movie_id"]) for row in candidate_rows}
+        self._active_candidate_sources = {
+            str(row["movie_id"]): (
+                str(row["source_ref"]) if row["source_ref"] is not None else None,
+                str(row["source_label"]) if row["source_label"] is not None else None,
+            )
+            for row in candidate_rows
+        }
         self._load_interaction_state()
 
     def save_session(self, session: RecommendationSession) -> RecommendationSession:
@@ -233,14 +404,19 @@ class PostgresRecommendationRepository:
                 self.connection.execute(
                     """
                     INSERT INTO recommendation_items (
-                        id, session_id, movie_id, rank, slot_type, score, score_components, created_at
+                        id, session_id, movie_id, rank, slot_type, score, score_components,
+                        source_ref, source_label, processing_status, processed_at, created_at
                     )
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     ON CONFLICT(id) DO UPDATE SET
                         rank = excluded.rank,
                         slot_type = excluded.slot_type,
                         score = excluded.score,
-                        score_components = excluded.score_components
+                        score_components = excluded.score_components,
+                        source_ref = excluded.source_ref,
+                        source_label = excluded.source_label,
+                        processing_status = excluded.processing_status,
+                        processed_at = excluded.processed_at
                     """,
                     (
                         item.id,
@@ -250,6 +426,10 @@ class PostgresRecommendationRepository:
                         item.slot_type.value,
                         item.score,
                         self._jsonb(item.score_components),
+                        item.source_ref,
+                        item.source_label,
+                        item.processing_status.value if item.processing_status else None,
+                        item.processed_at,
                         session.created_at,
                     ),
                 )
@@ -257,10 +437,6 @@ class PostgresRecommendationRepository:
         return session
 
     def get_session(self, session_id: str) -> RecommendationSession | None:
-        cached = self.sessions.get(session_id)
-        if cached is not None:
-            return cached
-
         row = self.connection.execute(
             """
             SELECT id, strategy, created_at
@@ -275,7 +451,9 @@ class PostgresRecommendationRepository:
         self.refresh()
         item_rows = self.connection.execute(
             """
-            SELECT id, movie_id, rank, slot_type, score, score_components
+            SELECT
+                id, movie_id, rank, slot_type, score, score_components,
+                source_ref, source_label, processing_status, processed_at
             FROM recommendation_items
             WHERE session_id = %s
             ORDER BY rank
@@ -294,6 +472,12 @@ class PostgresRecommendationRepository:
                     slot_type=SlotType(str(item_row["slot_type"])),
                     score=float(item_row["score"]),
                     score_components=self._dict_from_json_value(item_row["score_components"]),
+                    source_ref=str(item_row["source_ref"]) if item_row["source_ref"] is not None else None,
+                    source_label=str(item_row["source_label"]) if item_row["source_label"] is not None else None,
+                    processing_status=RecommendationProcessingStatus(str(item_row["processing_status"]))
+                    if item_row["processing_status"] is not None
+                    else None,
+                    processed_at=item_row["processed_at"],
                     id=str(item_row["id"]),
                 )
             )
@@ -305,6 +489,24 @@ class PostgresRecommendationRepository:
         )
         self.sessions[session.id] = session
         return session
+
+    def recent_recommendation_movie_ids(self, session_count: int) -> set[str]:
+        if session_count <= 0:
+            return set()
+        rows = self.connection.execute(
+            """
+            SELECT ri.movie_id
+            FROM recommendation_items ri
+            JOIN (
+                SELECT id
+                FROM recommendation_sessions
+                ORDER BY created_at DESC
+                LIMIT %s
+            ) recent_sessions ON recent_sessions.id = ri.session_id
+            """,
+            (session_count,),
+        ).fetchall()
+        return {str(row["movie_id"]) for row in rows}
 
     def add_feedback(self, feedback: Feedback) -> Feedback:
         self.connection.execute(
@@ -328,6 +530,55 @@ class PostgresRecommendationRepository:
         )
         self.feedback.append(feedback)
         return feedback
+
+    def mark_recommendation_item_processed(
+        self,
+        session_id: str,
+        item_id: str,
+        status: RecommendationProcessingStatus,
+    ) -> RecommendationItem:
+        processed_at = datetime.now(timezone.utc)
+        self.connection.execute(
+            """
+            UPDATE recommendation_items
+            SET processing_status = %s, processed_at = %s
+            WHERE session_id = %s AND id = %s
+            """,
+            (status.value, processed_at, session_id, item_id),
+        )
+        session = self.get_session(session_id)
+        if session is None:
+            raise KeyError("recommendation session not found")
+        item = next(candidate for candidate in session.items if candidate.id == item_id)
+        item.processing_status = status
+        item.processed_at = processed_at
+        return item
+
+    def deactivate_candidate_pool_movie(self, movie_id: str) -> None:
+        self.connection.execute(
+            """
+            UPDATE candidate_pool
+            SET active = FALSE, updated_at = %s
+            WHERE movie_id = %s AND active = TRUE
+            """,
+            (datetime.now(timezone.utc), movie_id),
+        )
+        self._active_candidate_movie_ids.discard(movie_id)
+
+    def restore_candidate_pool_movie_if_eligible(self, movie_id: str) -> None:
+        if any(item.movie_id == movie_id for item in self.history):
+            return
+        if self.find_active_wishlist_by_movie(movie_id) is not None:
+            return
+        self.connection.execute(
+            """
+            UPDATE candidate_pool
+            SET active = TRUE, updated_at = %s
+            WHERE movie_id = %s
+            """,
+            (datetime.now(timezone.utc), movie_id),
+        )
+        self._active_candidate_movie_ids.add(movie_id)
 
     def add_to_wishlist(self, movie: Movie, session_id: str) -> WishlistItem:
         existing = self.find_active_wishlist_by_movie(movie.id)
@@ -354,7 +605,11 @@ class PostgresRecommendationRepository:
 
     def list_active_wishlist(self) -> list[WishlistItem]:
         self.refresh()
-        return [item for item in self.wishlist.values() if item.status == WishlistStatus.ACTIVE]
+        return sorted(
+            [item for item in self.wishlist.values() if item.status == WishlistStatus.ACTIVE],
+            key=lambda item: item.created_at,
+            reverse=True,
+        )
 
     def find_wishlist_item(self, wishlist_id: str) -> WishlistItem | None:
         self.refresh()
@@ -362,6 +617,20 @@ class PostgresRecommendationRepository:
 
     def mark_wishlist_watched(self, wishlist_item: WishlistItem) -> WishlistItem:
         wishlist_item.status = WishlistStatus.WATCHED
+        wishlist_item.closed_at = datetime.now(timezone.utc)
+        self.connection.execute(
+            """
+            UPDATE wishlist
+            SET status = %s, closed_at = %s
+            WHERE id = %s
+            """,
+            (wishlist_item.status.value, wishlist_item.closed_at, wishlist_item.id),
+        )
+        self.wishlist[wishlist_item.id] = wishlist_item
+        return wishlist_item
+
+    def remove_wishlist_item(self, wishlist_item: WishlistItem) -> WishlistItem:
+        wishlist_item.status = WishlistStatus.REMOVED
         wishlist_item.closed_at = datetime.now(timezone.utc)
         self.connection.execute(
             """
@@ -408,8 +677,53 @@ class PostgresRecommendationRepository:
         self.history.append(history)
         return history
 
-    def _has_hard_negative(self, movie_id: str) -> bool:
-        return any(item.movie_id == movie_id and item.feedback_type == FeedbackType.NOT_INTERESTED for item in self.feedback)
+    def find_recommendation_item_by_session_and_movie(
+        self,
+        session_id: str,
+        movie_id: str,
+    ) -> RecommendationItem | None:
+        session = self.get_session(session_id)
+        if session is None:
+            return None
+        return next((item for item in session.items if item.movie.id == movie_id), None)
+
+    def list_current_not_interested(self) -> list[NotInterestedItem]:
+        self.refresh()
+        latest_by_movie = self._latest_state_feedback_by_movie()
+        items = [
+            NotInterestedItem(
+                movie=self.movies_by_id[feedback.movie_id],
+                state_event_id=feedback.id,
+                state_changed_at=feedback.created_at,
+                session_id=feedback.session_id,
+                item_id=feedback.item_id,
+            )
+            for feedback in latest_by_movie.values()
+            if feedback.feedback_type == FeedbackType.NOT_INTERESTED and feedback.movie_id in self.movies_by_id
+        ]
+        return sorted(items, key=lambda item: item.state_changed_at, reverse=True)
+
+    def _current_feedback_state(self, movie_id: str) -> FeedbackType | None:
+        latest = self._latest_state_feedback_by_movie().get(movie_id)
+        return latest.feedback_type if latest else None
+
+    def _latest_state_feedback_by_movie(self) -> dict[str, Feedback]:
+        state_events = {
+            FeedbackType.WANT_TO_WATCH,
+            FeedbackType.MAYBE_LATER,
+            FeedbackType.NOT_INTERESTED,
+            FeedbackType.REMOVED_FROM_WISHLIST,
+            FeedbackType.CLEAR_NOT_INTERESTED,
+        }
+        latest: dict[str, Feedback] = {}
+        for item in self.feedback:
+            if item.feedback_type in state_events:
+                latest[item.movie_id] = item
+        return latest
+
+    def _candidate_from_movie(self, movie: Movie) -> RecommendationCandidate:
+        source_ref, source_label = self._active_candidate_sources.get(movie.id, (None, None))
+        return RecommendationCandidate(movie=movie, source_ref=source_ref, source_label=source_label)
 
     def _movie_from_row(self, row: dict[str, Any]) -> Movie:
         subject_id = row["douban_subject_id"]
@@ -427,6 +741,7 @@ class PostgresRecommendationRepository:
             douban_rating=float(row["douban_rating"] or 0),
             douban_vote_count=int(row["douban_vote_count"] or 0),
             douban_url=douban_url,
+            poster_url=row.get("poster_url"),
         )
 
     def _tuple_from_json_value(self, value: Any) -> tuple[str, ...]:
@@ -482,7 +797,7 @@ class PostgresRecommendationRepository:
                 """
                 SELECT
                     id, douban_subject_id, douban_url, title, year, directors, actors,
-                    genres, countries, douban_rating, douban_vote_count
+                    genres, countries, douban_rating, douban_vote_count, poster_url
                 FROM movies
                 """
             ).fetchall()
@@ -524,11 +839,20 @@ class PostgresRecommendationRepository:
                     slot_type TEXT NOT NULL,
                     score NUMERIC NOT NULL,
                     score_components JSONB NOT NULL DEFAULT '{}'::jsonb,
+                    source_ref TEXT,
+                    source_label TEXT,
+                    processing_status TEXT,
+                    processed_at TIMESTAMPTZ,
                     created_at TIMESTAMPTZ NOT NULL,
                     UNIQUE(session_id, rank)
                 )
                 """
             )
+            self.connection.execute("ALTER TABLE recommendation_items ADD COLUMN IF NOT EXISTS source_ref TEXT")
+            self.connection.execute("ALTER TABLE recommendation_items ADD COLUMN IF NOT EXISTS source_label TEXT")
+            self.connection.execute("ALTER TABLE recommendation_items ADD COLUMN IF NOT EXISTS processing_status TEXT")
+            self.connection.execute("ALTER TABLE recommendation_items ADD COLUMN IF NOT EXISTS processed_at TIMESTAMPTZ")
+            self.connection.execute("ALTER TABLE IF EXISTS candidate_pool ADD COLUMN IF NOT EXISTS source_label TEXT")
             self.connection.execute(
                 """
                 CREATE TABLE IF NOT EXISTS feedback (
@@ -567,31 +891,82 @@ class RecommendationService:
         self.repository = repository
         self.explore_pool_size = explore_pool_size
 
-    def recommend(self, strategy: Strategy = "hybrid", explore_seed: int | None = None) -> RecommendationSession:
-        candidates = self.repository.active_candidates()
-        if len(candidates) < 5:
-            raise ValueError("At least five eligible candidates are required")
+    def recommend(
+        self,
+        strategy: Strategy = "hybrid",
+        explore_seed: int | None = None,
+        exposure_cooldown_sessions: int = 5,
+    ) -> RecommendationSession:
+        with self._repository_lock_context():
+            return self._recommend(
+                strategy=strategy,
+                explore_seed=explore_seed,
+                exposure_cooldown_sessions=exposure_cooldown_sessions,
+            )
 
-        scored = [(movie, self._score(movie, strategy)) for movie in candidates]
+    def _recommend(
+        self,
+        strategy: Strategy = "hybrid",
+        explore_seed: int | None = None,
+        exposure_cooldown_sessions: int = 5,
+    ) -> RecommendationSession:
+        candidates = self.repository.active_candidates()
+        if len(candidates) < RECOMMENDATION_SESSION_SIZE:
+            raise ValueError(f"At least {RECOMMENDATION_SESSION_SIZE} eligible candidates are required")
+
+        requested_cooldown = max(0, exposure_cooldown_sessions)
+        applied_cooldown, candidates = self._apply_exposure_cooldown(candidates, requested_cooldown)
+
+        scored = [(candidate, self._score_with_feedback_penalty(candidate.movie, strategy)) for candidate in candidates]
         scored.sort(key=lambda item: item[1]["total"], reverse=True)
 
-        exploit_movies = [movie for movie, _ in scored[:3]]
-        selected = list(exploit_movies)
-        remaining = [(movie, scores) for movie, scores in scored if movie not in selected]
-        explore_movies = self._select_explore(remaining, selected, limit=2, explore_seed=explore_seed)
-        selected.extend(explore_movies)
+        exploit_candidates = [candidate for candidate, _ in scored[:EXPLOIT_SLOT_COUNT]]
+        selected = list(exploit_candidates)
+        remaining = [(candidate, scores) for candidate, scores in scored if candidate not in selected]
+        explore_candidates = self._select_explore(
+            remaining,
+            selected,
+            limit=EXPLORE_SLOT_COUNT,
+            explore_seed=explore_seed,
+        )
+        selected.extend(explore_candidates)
 
         items = [
             RecommendationItem(
-                movie=movie,
+                movie=candidate.movie,
                 rank=index + 1,
-                slot_type=SlotType.EXPLOIT if index < 3 else SlotType.EXPLORE,
-                score=self._score(movie, strategy)["total"],
-                score_components=self._score(movie, strategy),
+                slot_type=SlotType.EXPLOIT if index < EXPLOIT_SLOT_COUNT else SlotType.EXPLORE,
+                score=scores["total"],
+                score_components=scores,
+                source_ref=candidate.source_ref,
+                source_label=self._source_label(candidate),
             )
-            for index, movie in enumerate(selected)
+            for index, candidate in enumerate(selected)
+            for scores in [self._score_with_feedback_penalty(candidate.movie, strategy)]
         ]
-        return self.repository.save_session(RecommendationSession(strategy=strategy, items=items))
+        return self.repository.save_session(
+            RecommendationSession(
+                strategy=strategy,
+                items=items,
+                debug_metadata={
+                    "requested_exposure_cooldown_sessions": requested_cooldown,
+                    "applied_exposure_cooldown_sessions": applied_cooldown,
+                    "cooldown_relaxed": applied_cooldown < requested_cooldown,
+                    "seed": explore_seed,
+                    "eligible_candidate_count": len(candidates),
+                },
+            )
+        )
+
+    def _repository_lock_context(self):
+        lock = getattr(self.repository, "lock", None)
+        return lock if lock is not None else nullcontext()
+
+    def get_session(self, session_id: str) -> RecommendationSession:
+        session = self.repository.get_session(session_id)
+        if session is None:
+            raise KeyError("recommendation session not found")
+        return session
 
     def submit_feedback(self, session_id: str, item_id: str, request: FeedbackRequest) -> Feedback:
         session = self.repository.get_session(session_id)
@@ -613,7 +988,64 @@ class RecommendationService:
         )
         if request.feedback_type == FeedbackType.WANT_TO_WATCH:
             self.repository.add_to_wishlist(item.movie, session_id)
+            self.repository.mark_recommendation_item_processed(
+                session_id,
+                item_id,
+                RecommendationProcessingStatus.ADDED_TO_WISHLIST,
+            )
+        elif request.feedback_type == FeedbackType.NOT_INTERESTED:
+            self.repository.mark_recommendation_item_processed(
+                session_id,
+                item_id,
+                RecommendationProcessingStatus.NOT_INTERESTED,
+            )
+            self.repository.deactivate_candidate_pool_movie(item.movie.id)
+        elif request.feedback_type == FeedbackType.MAYBE_LATER:
+            self.repository.mark_recommendation_item_processed(
+                session_id,
+                item_id,
+                RecommendationProcessingStatus.MAYBE_LATER,
+            )
+        elif request.feedback_type == FeedbackType.CLEAR_NOT_INTERESTED:
+            self.repository.restore_candidate_pool_movie_if_eligible(item.movie.id)
         return feedback
+
+    def mark_watched_from_recommendation(
+        self,
+        session_id: str,
+        item_id: str,
+        movie_id: str | None = None,
+    ) -> RecommendationItem:
+        session = self.repository.get_session(session_id)
+        if session is None:
+            raise KeyError("recommendation session not found")
+        item = next((candidate for candidate in session.items if candidate.id == item_id), None)
+        if item is None:
+            raise KeyError("recommendation item not found")
+        if movie_id is not None and item.movie.id != movie_id:
+            raise ValueError("recommendation item does not match recorded movie")
+        processed = self.repository.mark_recommendation_item_processed(
+            session_id,
+            item_id,
+            RecommendationProcessingStatus.WATCHED,
+        )
+        self.repository.deactivate_candidate_pool_movie(item.movie.id)
+        return processed
+
+    def mark_watched_movie(self, movie_id: str) -> None:
+        self.repository.deactivate_candidate_pool_movie(movie_id)
+
+    def mark_wishlist_item_watched_from_record(self, wishlist_id: str, movie_id: str | None = None) -> WishlistItem:
+        wishlist_item = self.repository.find_wishlist_item(wishlist_id)
+        if wishlist_item is None:
+            raise KeyError("wishlist item not found")
+        if wishlist_item.status != WishlistStatus.ACTIVE:
+            raise ValueError("wishlist item is not active")
+        if movie_id is not None and wishlist_item.movie.id != movie_id:
+            raise ValueError("wishlist item does not match recorded movie")
+        wishlist_item = self.repository.mark_wishlist_watched(wishlist_item)
+        self.repository.deactivate_candidate_pool_movie(wishlist_item.movie.id)
+        return wishlist_item
 
     def record_watched(self, wishlist_id: str, request: RecordWatchedRequest) -> ViewingHistory:
         wishlist_item = self.repository.find_wishlist_item(wishlist_id)
@@ -630,7 +1062,67 @@ class RecommendationService:
             quality=request.quality,
             comment=request.comment,
         )
-        return self.repository.add_viewing_history(history, wishlist_id)
+        history = self.repository.add_viewing_history(history, wishlist_id)
+        self.repository.deactivate_candidate_pool_movie(wishlist_item.movie.id)
+        return history
+
+    def remove_from_wishlist(self, wishlist_id: str) -> WishlistItem:
+        wishlist_item = self.repository.find_wishlist_item(wishlist_id)
+        if wishlist_item is None:
+            raise KeyError("wishlist item not found")
+        if wishlist_item.status != WishlistStatus.ACTIVE:
+            raise ValueError("wishlist item is not active")
+
+        removed = self.repository.remove_wishlist_item(wishlist_item)
+        self.repository.add_feedback(
+            Feedback(
+                session_id=removed.source_session_id,
+                item_id=self._feedback_item_id_for_movie(removed.source_session_id, removed.movie.id),
+                movie_id=removed.movie.id,
+                feedback_type=FeedbackType.REMOVED_FROM_WISHLIST,
+                feedback_value=self._feedback_value(FeedbackType.REMOVED_FROM_WISHLIST),
+            )
+        )
+        return removed
+
+    def clear_not_interested(self, movie_id: str) -> NotInterestedItem:
+        current = next((item for item in self.repository.list_current_not_interested() if item.movie.id == movie_id), None)
+        if current is None:
+            raise KeyError("not interested movie not found")
+        self.repository.add_feedback(
+            Feedback(
+                session_id=current.session_id,
+                item_id=current.item_id,
+                movie_id=current.movie.id,
+                feedback_type=FeedbackType.CLEAR_NOT_INTERESTED,
+                feedback_value=self._feedback_value(FeedbackType.CLEAR_NOT_INTERESTED),
+            )
+        )
+        self.repository.restore_candidate_pool_movie_if_eligible(current.movie.id)
+        return current
+
+    def _feedback_item_id_for_movie(self, session_id: str, movie_id: str) -> str:
+        session = self.repository.get_session(session_id)
+        if session is None:
+            raise KeyError("recommendation session not found")
+        item = next((candidate for candidate in session.items if candidate.movie.id == movie_id), None)
+        if item is None:
+            raise KeyError("recommendation item not found")
+        return item.id
+
+    def _apply_exposure_cooldown(
+        self,
+        candidates: list[RecommendationCandidate],
+        requested_cooldown: int,
+    ) -> tuple[int, list[RecommendationCandidate]]:
+        applied_cooldown = requested_cooldown
+        while applied_cooldown > 0:
+            exposed_movie_ids = self.repository.recent_recommendation_movie_ids(applied_cooldown)
+            filtered = [candidate for candidate in candidates if candidate.movie.id not in exposed_movie_ids]
+            if len(filtered) >= RECOMMENDATION_SESSION_SIZE:
+                return applied_cooldown, filtered
+            applied_cooldown -= 1
+        return 0, candidates
 
     def _score(self, movie: Movie, strategy: Strategy) -> dict[str, float]:
         if strategy == "popularity":
@@ -643,31 +1135,53 @@ class RecommendationService:
             return hybrid_score(movie, self.repository.history, self.repository.movies_by_id)
         raise ValueError(f"Unknown recommendation strategy: {strategy}")
 
+    def _score_with_feedback_penalty(self, movie: Movie, strategy: Strategy) -> dict[str, float]:
+        scores = dict(self._score(movie, strategy))
+        penalty = self._maybe_later_penalty(movie.id)
+        if penalty:
+            scores["maybe_later_penalty"] = -penalty
+            scores["total"] = scores["total"] - penalty
+        return scores
+
+    def _maybe_later_penalty(self, movie_id: str) -> float:
+        count = sum(
+            1
+            for feedback in self.repository.feedback
+            if feedback.movie_id == movie_id
+            and feedback.feedback_type in {FeedbackType.MAYBE_LATER, FeedbackType.REMOVED_FROM_WISHLIST}
+        )
+        return min(6.0, count * 1.5)
+
     def _select_explore(
         self,
-        scored: list[tuple[Movie, dict[str, float]]],
-        selected: list[Movie],
+        scored: list[tuple[RecommendationCandidate, dict[str, float]]],
+        selected: list[RecommendationCandidate],
         limit: int,
         explore_seed: int | None = None,
-    ) -> list[Movie]:
+    ) -> list[RecommendationCandidate]:
         rng = random.Random(explore_seed) if explore_seed is not None else random.Random()
-        explore: list[Movie] = []
+        explore: list[RecommendationCandidate] = []
         for _ in range(limit):
             if not scored:
                 break
+            selected_movies = [candidate.movie for candidate in selected + explore]
             ranked = sorted(
                 (
-                    (movie, scores, diversity_gain(movie, selected + explore) * 0.65 + scores["total"] * 0.35)
-                    for movie, scores in scored
+                    (
+                        candidate,
+                        scores,
+                        diversity_gain(candidate.movie, selected_movies) * 0.65 + scores["total"] * 0.35,
+                    )
+                    for candidate, scores in scored
                 ),
                 key=lambda item: item[2],
                 reverse=True,
             )
             sample_pool = ranked[: max(limit, self.explore_pool_size)]
             weights = _positive_weights([item[2] for item in sample_pool])
-            movie = rng.choices([item[0] for item in sample_pool], weights=weights, k=1)[0]
-            scored = [(candidate, scores) for candidate, scores in scored if candidate.id != movie.id]
-            explore.append(movie)
+            candidate = rng.choices([item[0] for item in sample_pool], weights=weights, k=1)[0]
+            scored = [(item, scores) for item, scores in scored if item.movie.id != candidate.movie.id]
+            explore.append(candidate)
         return explore
 
     def _feedback_value(self, feedback_type: FeedbackType) -> float:
@@ -676,6 +1190,8 @@ class RecommendationService:
             FeedbackType.MAYBE_LATER: 0.2,
             FeedbackType.NOT_INTERESTED: -0.8,
             FeedbackType.OPENED_DOUBAN: 0.1,
+            FeedbackType.REMOVED_FROM_WISHLIST: 0.2,
+            FeedbackType.CLEAR_NOT_INTERESTED: 0.0,
         }[feedback_type]
 
     def to_session_response(self, session: RecommendationSession) -> dict:
@@ -683,6 +1199,7 @@ class RecommendationService:
             "id": session.id,
             "strategy": session.strategy,
             "created_at": session.created_at.isoformat(),
+            "debug_metadata": session.debug_metadata,
             "items": [
                 {
                     "id": item.id,
@@ -690,6 +1207,10 @@ class RecommendationService:
                     "slot_type": item.slot_type.value,
                     "score": item.score,
                     "score_components": item.score_components,
+                    "source_ref": item.source_ref,
+                    "source_label": self._source_label_for_item(item),
+                    "processing_status": item.processing_status.value if item.processing_status else None,
+                    "processed_at": item.processed_at.isoformat() if item.processed_at else None,
                     "movie": self._movie_response(item.movie),
                 }
                 for item in session.items
@@ -708,19 +1229,52 @@ class RecommendationService:
             "created_at": feedback.created_at.isoformat(),
         }
 
-    def to_wishlist_response(self) -> dict:
+    def to_wishlist_response(self, limit: int = 10, offset: int = 0) -> dict:
+        items = self.repository.list_active_wishlist()
+        paged_items = items[offset : offset + limit]
         return {
-            "items": [
-                {
-                    "id": item.id,
-                    "status": item.status.value,
-                    "source_session_id": item.source_session_id,
-                    "created_at": item.created_at.isoformat(),
-                    "closed_at": item.closed_at.isoformat() if item.closed_at else None,
-                    "movie": self._movie_response(item.movie),
-                }
-                for item in self.repository.list_active_wishlist()
-            ]
+            "limit": limit,
+            "offset": offset,
+            "total": len(items),
+            "items": [self.to_wishlist_item_response(item) for item in paged_items],
+        }
+
+    def to_wishlist_item_response(self, item: WishlistItem) -> dict:
+        recommendation_item = self.repository.find_recommendation_item_by_session_and_movie(
+            item.source_session_id,
+            item.movie.id,
+        )
+        return {
+            "id": item.id,
+            "status": item.status.value,
+            "source_session_id": item.source_session_id,
+            "score": recommendation_item.score if recommendation_item else None,
+            "source_ref": recommendation_item.source_ref if recommendation_item else None,
+            "source_label": self._source_label_for_item(recommendation_item) if recommendation_item else None,
+            "created_at": item.created_at.isoformat(),
+            "closed_at": item.closed_at.isoformat() if item.closed_at else None,
+            "movie": self._movie_response(item.movie),
+        }
+
+    def to_not_interested_response(self, limit: int = 10, offset: int = 0) -> dict:
+        items = self.repository.list_current_not_interested()
+        paged_items = items[offset : offset + limit]
+        return {
+            "limit": limit,
+            "offset": offset,
+            "total": len(items),
+            "items": [self.to_not_interested_item_response(item) for item in paged_items],
+        }
+
+    def to_not_interested_item_response(self, item: NotInterestedItem) -> dict:
+        return {
+            "id": item.state_event_id,
+            "movie_id": item.movie.id,
+            "state": FeedbackType.NOT_INTERESTED.value,
+            "state_changed_at": item.state_changed_at.isoformat(),
+            "session_id": item.session_id,
+            "item_id": item.item_id,
+            "movie": self._movie_response(item.movie),
         }
 
     def to_viewing_history_response(self, history: ViewingHistory) -> dict:
@@ -730,16 +1284,61 @@ class RecommendationService:
         return response
 
     def _movie_response(self, movie: Movie) -> dict:
+        directors = display_person_names(movie.directors)
+        cast = display_person_names(movie.actors)
         return {
             "id": movie.id,
             "title": movie.title,
             "year": movie.year,
-            "director": ", ".join(movie.directors),
-            "main_cast": list(movie.actors[:3]),
+            "director": ", ".join(directors),
+            "directors": directors,
+            "main_cast": cast[:3],
+            "cast": cast,
             "douban_rating": movie.douban_rating,
             "awards": list(movie.awards),
             "douban_url": movie.douban_url,
+            "poster_url": movie.poster_url,
         }
+
+    def _source_label(self, candidate: RecommendationCandidate) -> str | None:
+        if candidate.source_ref and candidate.source_ref.startswith("top"):
+            return candidate.source_ref
+        if candidate.source_ref and candidate.source_ref.startswith("recommended_from:"):
+            if candidate.source_label and candidate.source_label != "Recommend from unknown movie":
+                prefix = "recommended from "
+                if candidate.source_label.lower().startswith(prefix):
+                    return f"Recommend from {candidate.source_label[len(prefix):]}"
+                return candidate.source_label
+            source_title = self._source_movie_title(candidate.source_ref)
+            if source_title:
+                return f"Recommend from {source_title}"
+            return "Recommend from unknown movie"
+        return candidate.source_label
+
+    def _source_label_for_item(self, item: RecommendationItem) -> str | None:
+        return self._source_label(
+            RecommendationCandidate(
+                movie=item.movie,
+                source_ref=item.source_ref,
+                source_label=item.source_label,
+            )
+        )
+
+    def _source_movie_title(self, source_ref: str | None) -> str | None:
+        if not source_ref or not source_ref.startswith("recommended_from:"):
+            return None
+        subject_id = source_ref.split(":", 1)[1]
+        for movie in self.repository.movies_by_id.values():
+            if _subject_id_from_douban_url(movie.douban_url) == subject_id:
+                return movie.title
+        return None
+
+
+def _subject_id_from_douban_url(url: str) -> str | None:
+    parts = url.rstrip("/").split("/")
+    if len(parts) >= 2 and parts[-2] == "subject":
+        return parts[-1]
+    return None
 
 
 def create_recommendation_service() -> RecommendationService:

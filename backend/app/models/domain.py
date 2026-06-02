@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
 from enum import Enum
+from typing import Any
 from uuid import uuid4
 
 
@@ -11,6 +12,8 @@ class FeedbackType(str, Enum):
     MAYBE_LATER = "maybe_later"
     NOT_INTERESTED = "not_interested"
     OPENED_DOUBAN = "opened_douban"
+    REMOVED_FROM_WISHLIST = "removed_from_wishlist"
+    CLEAR_NOT_INTERESTED = "clear_not_interested"
 
 
 class SlotType(str, Enum):
@@ -22,6 +25,13 @@ class WishlistStatus(str, Enum):
     ACTIVE = "active"
     WATCHED = "watched"
     REMOVED = "removed"
+
+
+class RecommendationProcessingStatus(str, Enum):
+    WATCHED = "watched"
+    ADDED_TO_WISHLIST = "added_to_wishlist"
+    NOT_INTERESTED = "not_interested"
+    MAYBE_LATER = "maybe_later"
 
 
 class DoubanMatchStatus(str, Enum):
@@ -148,6 +158,7 @@ class Movie:
     douban_vote_count: int
     douban_url: str
     awards: tuple[str, ...] = ()
+    poster_url: str | None = None
 
     @property
     def decade(self) -> int:
@@ -172,6 +183,10 @@ class RecommendationItem:
     slot_type: SlotType
     score: float
     score_components: dict[str, float]
+    source_ref: str | None = None
+    source_label: str | None = None
+    processing_status: RecommendationProcessingStatus | None = None
+    processed_at: datetime | None = None
     id: str = field(default_factory=lambda: str(uuid4()))
 
 
@@ -181,6 +196,7 @@ class RecommendationSession:
     items: list[RecommendationItem]
     id: str = field(default_factory=lambda: str(uuid4()))
     created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    debug_metadata: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass

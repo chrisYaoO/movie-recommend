@@ -2,10 +2,12 @@
 
 from dataclasses import asdict, dataclass
 from datetime import date
+import re
 from typing import Protocol
 
 from backend.app.db.repository import ViewingHistoryRepository
 from backend.app.models.domain import ConfirmedViewingHistoryInput, DoubanMovieDetail
+from backend.app.services.display_text import display_person_names
 from backend.app.services.google_sheets_service import GoogleSheetsAppendService
 from backend.app.services.import_service import RAW_HASH_COLUMNS, stable_row_hash
 from backend.app.services.metadata_service import DoubanDetailAdapter
@@ -18,6 +20,9 @@ class RecordViewingHistoryRequest:
     watched_date: date
     rating: float
     sheet: str
+    session_id: str | None = None
+    recommendation_item_id: str | None = None
+    wishlist_id: str | None = None
     title: str | None = None
     director: str | None = None
     year: int | None = None
@@ -66,18 +71,21 @@ class ViewingHistoryRecordService:
         if existing_movie is None:
             detail = self.detail_adapter.fetch(subject_id)
             title = detail.title
-            director = ", ".join(detail.directors)
+            director = ", ".join(display_person_names(detail.directors))
             year = detail.year
+            image_id = _douban_image_id_from_url(detail.poster_url)
         else:
             title = existing_movie.title
-            director = request.director
-            year = request.year
+            director = ", ".join(display_person_names(existing_movie.directors)) or request.director
+            year = existing_movie.year or request.year
+            image_id = _douban_image_id_from_url(existing_movie.poster_url)
 
         row_values = _sheet_row_values(
             title=title,
             director=director,
             year=year,
             subject_id=subject_id,
+            image_id=image_id,
             request=request,
         )
         appended = self.sheets.append_viewing_history_row(request.sheet.strip(), row_values)
@@ -135,6 +143,7 @@ def _sheet_row_values(
     director: str | None,
     year: int | None,
     subject_id: str,
+    image_id: str | None,
     request: RecordViewingHistoryRequest,
 ) -> list[str | float | int]:
     return [
@@ -146,7 +155,7 @@ def _sheet_row_values(
         request.quality or "",
         request.comment or "",
         subject_id,
-        "",
+        image_id or "",
     ]
 
 
@@ -163,5 +172,12 @@ def _source_row_checksum(row_values: list[str | float | int]) -> str:
         "DoubanImageId": str(row_values[8]) if row_values[8] != "" else None,
     }
     return stable_row_hash({column: values.get(column) for column in RAW_HASH_COLUMNS})
+
+
+def _douban_image_id_from_url(url: str | None) -> str | None:
+    if not url:
+        return None
+    match = re.search(r"/p(\d+)\.[A-Za-z0-9]+(?:[?#].*)?$", url)
+    return match.group(1) if match else None
 
 

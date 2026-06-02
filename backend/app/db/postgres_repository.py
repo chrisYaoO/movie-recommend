@@ -126,6 +126,7 @@ class PostgresViewingHistoryRepository:
                     movie_id UUID NOT NULL REFERENCES movies(id),
                     source_type TEXT NOT NULL,
                     source_ref TEXT NOT NULL,
+                    source_label TEXT,
                     active BOOLEAN NOT NULL,
                     created_at TIMESTAMPTZ NOT NULL,
                     updated_at TIMESTAMPTZ NOT NULL,
@@ -164,11 +165,20 @@ class PostgresViewingHistoryRepository:
                     slot_type TEXT NOT NULL,
                     score NUMERIC NOT NULL,
                     score_components JSONB NOT NULL DEFAULT '{}'::jsonb,
+                    source_ref TEXT,
+                    source_label TEXT,
+                    processing_status TEXT,
+                    processed_at TIMESTAMPTZ,
                     created_at TIMESTAMPTZ NOT NULL,
                     UNIQUE(session_id, rank)
                 )
                 """
             )
+            self.connection.execute("ALTER TABLE candidate_pool ADD COLUMN IF NOT EXISTS source_label TEXT")
+            self.connection.execute("ALTER TABLE recommendation_items ADD COLUMN IF NOT EXISTS source_ref TEXT")
+            self.connection.execute("ALTER TABLE recommendation_items ADD COLUMN IF NOT EXISTS source_label TEXT")
+            self.connection.execute("ALTER TABLE recommendation_items ADD COLUMN IF NOT EXISTS processing_status TEXT")
+            self.connection.execute("ALTER TABLE recommendation_items ADD COLUMN IF NOT EXISTS processed_at TIMESTAMPTZ")
             self.connection.execute(
                 """
                 CREATE TABLE IF NOT EXISTS feedback (
@@ -213,7 +223,7 @@ class PostgresViewingHistoryRepository:
 
     def find_movie_by_subject_id(self, subject_id: str) -> PersistedMovie | None:
         row = self.connection.execute(
-            "SELECT id, douban_subject_id, title FROM movies WHERE douban_subject_id = %s",
+            "SELECT id, douban_subject_id, title, year, directors, poster_url FROM movies WHERE douban_subject_id = %s",
             (subject_id,),
         ).fetchone()
         if row is None:
@@ -222,6 +232,9 @@ class PostgresViewingHistoryRepository:
             id=str(row["id"]),
             douban_subject_id=str(row["douban_subject_id"]),
             title=str(row["title"]),
+            year=int(row["year"]) if row["year"] is not None else None,
+            directors=tuple(str(item) for item in (row["directors"] or [])),
+            poster_url=str(row["poster_url"]) if row["poster_url"] is not None else None,
         )
 
     def find_watched_movies(self, limit: int | None = None) -> list[PersistedMovie]:
@@ -405,7 +418,14 @@ class PostgresViewingHistoryRepository:
                 now,
             ),
         )
-        return PersistedMovie(id=movie_id, douban_subject_id=detail.subject_id, title=detail.title)
+        return PersistedMovie(
+            id=movie_id,
+            douban_subject_id=detail.subject_id,
+            title=detail.title,
+            year=detail.year,
+            directors=detail.directors,
+            poster_url=detail.poster_url,
+        )
 
     def upsert_viewing_history(
         self,
@@ -536,7 +556,13 @@ class PostgresViewingHistoryRepository:
             (status, error, datetime.now(timezone.utc), subject_id),
         )
 
-    def upsert_candidate_pool_entry(self, movie_id: str, source_type: str, source_ref: str) -> bool:
+    def upsert_candidate_pool_entry(
+        self,
+        movie_id: str,
+        source_type: str,
+        source_ref: str,
+        source_label: str | None = None,
+    ) -> bool:
         existing = self.connection.execute(
             """
             SELECT id FROM candidate_pool
@@ -549,16 +575,45 @@ class PostgresViewingHistoryRepository:
         self.connection.execute(
             """
             INSERT INTO candidate_pool (
-                id, movie_id, source_type, source_ref, active, created_at, updated_at
+                id, movie_id, source_type, source_ref, source_label, active, created_at, updated_at
             )
-            VALUES (%s, %s, %s, %s, TRUE, %s, %s)
+            VALUES (%s, %s, %s, %s, %s, TRUE, %s, %s)
             ON CONFLICT(movie_id, source_type, source_ref) DO UPDATE SET
+                source_label = COALESCE(excluded.source_label, candidate_pool.source_label),
                 active = TRUE,
                 updated_at = excluded.updated_at
             """,
-            (pool_id, movie_id, source_type, source_ref, now, now),
+            (pool_id, movie_id, source_type, source_ref, source_label, now, now),
         )
         return existing is None
+
+    def backfill_candidate_source_labels_from_movies(self) -> int:
+        now = datetime.now(timezone.utc)
+        queue_cursor = self.connection.execute(
+            """
+            UPDATE candidate_subject_queue queue
+            SET source_label = 'recommended from ' || source_movie.title,
+                updated_at = %s
+            FROM movies source_movie
+            WHERE queue.source_ref LIKE 'recommended_from:%'
+              AND (queue.source_label IS NULL OR queue.source_label = '')
+              AND source_movie.douban_subject_id = split_part(queue.source_ref, ':', 2)
+            """,
+            (now,),
+        )
+        pool_cursor = self.connection.execute(
+            """
+            UPDATE candidate_pool pool
+            SET source_label = 'recommended from ' || source_movie.title,
+                updated_at = %s
+            FROM movies source_movie
+            WHERE pool.source_ref LIKE 'recommended_from:%'
+              AND (pool.source_label IS NULL OR pool.source_label = '')
+              AND source_movie.douban_subject_id = split_part(pool.source_ref, ':', 2)
+            """,
+            (now,),
+        )
+        return int(queue_cursor.rowcount or 0) + int(pool_cursor.rowcount or 0)
 
 
 def _jsonb(value):

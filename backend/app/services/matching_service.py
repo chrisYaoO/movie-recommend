@@ -20,6 +20,7 @@ from backend.app.models.domain import (
     DoubanSearchResult,
     ViewingHistoryCandidate,
 )
+from backend.app.services.display_text import display_movie_title, display_person_name
 
 SUBJECT_ID_STRATEGY = "subject_id"
 METADATA_STRATEGY = "metadata"
@@ -169,21 +170,28 @@ class FileDoubanSearchCache:
 
 
 class CachedDoubanSearchAdapter:
-    def __init__(self, inner: DoubanSearchAdapter, cache: DoubanSearchCache) -> None:
+    def __init__(
+        self,
+        inner: DoubanSearchAdapter,
+        cache: DoubanSearchCache,
+        cache_empty_results: bool = True,
+    ) -> None:
         self.inner = inner
         self.cache = cache
+        self.cache_empty_results = cache_empty_results
         self.hit_count = 0
         self.miss_count = 0
 
     def search(self, match_input: DoubanMatchInput) -> list[DoubanSearchResult]:
         cached = self.cache.get(match_input)
-        if cached is not None:
+        if cached is not None and (cached or self.cache_empty_results):
             self.hit_count += 1
             return cached
 
         self.miss_count += 1
         results = self.inner.search(match_input)
-        self.cache.set(match_input, results)
+        if results or self.cache_empty_results:
+            self.cache.set(match_input, results)
         return results
 
 
@@ -335,10 +343,11 @@ def parse_douban_search_results(html: str, limit: int = 5) -> list[DoubanSearchR
             continue
 
         context = html[match.end() : match.end() + 900]
+        original_title = _extract_original_title(context)
         results.append(
             DoubanSearchResult(
                 subject_id=subject_id,
-                title=title,
+                title=display_movie_title(title, original_title),
                 year=_extract_year(context),
                 director=_extract_director(context),
                 url=f"https://movie.douban.com/subject/{subject_id}/",
@@ -550,6 +559,22 @@ def _extract_year(context: str) -> int | None:
 def _extract_director(context: str) -> str | None:
     text = _clean_html_text(context)
     match = re.search(r"(?:\u5bfc\u6f14|瀵兼紨)[:\uff1a]\s*([^/]+)", text)
+    if match is not None:
+        return display_person_name(match.group(1).strip()) or None
+    for part in (item.strip() for item in text.split("/")):
+        if not part or re.search(r"\b(19\d{2}|20\d{2})\b", part):
+            continue
+        if part.startswith("原名:") or part.startswith("原名："):
+            continue
+        if "评分" in part or "评价" in part:
+            continue
+        return display_person_name(part)
+    return None
+
+
+def _extract_original_title(context: str) -> str | None:
+    text = _clean_html_text(context)
+    match = re.search(r"原名[:：]\s*([^/]+)", text)
     if match is None:
         return None
     return match.group(1).strip() or None

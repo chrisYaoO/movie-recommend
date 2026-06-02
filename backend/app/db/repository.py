@@ -11,6 +11,9 @@ class PersistedMovie:
     id: str
     douban_subject_id: str
     title: str
+    year: int | None = None
+    directors: tuple[str, ...] = ()
+    poster_url: str | None = None
 
 
 @dataclass(frozen=True)
@@ -116,7 +119,16 @@ class ViewingHistoryRepository(Protocol):
     def mark_candidate_subject_status(self, subject_id: str, status: str, error: str | None = None) -> None:
         pass
 
-    def upsert_candidate_pool_entry(self, movie_id: str, source_type: str, source_ref: str) -> bool:
+    def upsert_candidate_pool_entry(
+        self,
+        movie_id: str,
+        source_type: str,
+        source_ref: str,
+        source_label: str | None = None,
+    ) -> bool:
+        pass
+
+    def backfill_candidate_source_labels_from_movies(self) -> int:
         pass
 
 

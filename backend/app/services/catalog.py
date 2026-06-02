@@ -16,6 +16,8 @@ def seed_movies() -> list[Movie]:
         Movie("m-the-handmaiden", "The Handmaiden", 2016, ("Park Chan-wook",), ("Kim Min-hee", "Kim Tae-ri"), ("Drama", "Mystery"), ("South Korea",), 8.3, 620000, "https://movie.douban.com/subject/25977027/"),
         Movie("m-before-sunrise", "Before Sunrise", 1995, ("Richard Linklater",), ("Ethan Hawke", "Julie Delpy"), ("Drama", "Romance"), ("United States",), 8.8, 510000, "https://movie.douban.com/subject/1296339/"),
         Movie("m-perfect-days", "Perfect Days", 2023, ("Wim Wenders",), ("Koji Yakusho",), ("Drama",), ("Japan",), 8.2, 90000, "https://movie.douban.com/subject/35956190/"),
+        Movie("m-shoplifters", "Shoplifters", 2018, ("Hirokazu Kore-eda",), ("Lily Franky", "Sakura Ando"), ("Drama",), ("Japan",), 8.7, 900000, "https://movie.douban.com/subject/27622447/"),
+        Movie("m-parasite", "Parasite", 2019, ("Bong Joon-ho",), ("Song Kang-ho", "Cho Yeo-jeong"), ("Drama", "Thriller"), ("South Korea",), 8.8, 1400000, "https://movie.douban.com/subject/27010768/"),
     ]
 
 

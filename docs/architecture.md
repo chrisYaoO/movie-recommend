@@ -506,7 +506,7 @@ The service first scores every eligible candidate, sorts by `hybrid_total`, and 
 exploit slots = top 4 by hybrid_total
 ```
 
-Then it selects two explore slots from the remaining candidates. Explore selection
+Then it selects four explore slots from the remaining candidates. Explore selection
 first ranks remaining candidates by:
 
 ```text
@@ -539,7 +539,7 @@ diversity_gain =
   + decade_gain * 0.20
 ```
 
-This diversity score is batch-local. It prevents a single recommendation session from returning six very similar movies; it does not measure novelty against the user's full viewing history.
+This diversity score is batch-local. It prevents a single recommendation session from returning eight very similar movies; it does not measure novelty against the user's full viewing history.
 
 ### Feedback Weights
 
@@ -587,8 +587,8 @@ GET  /movies/{movie_id}
 
 Primary screen.
 
-- button to request six recommendations
-- six movie cards
+- button to request eight recommendations
+- eight movie cards
 - actions:
   - want-to-watch
   - maybe-later

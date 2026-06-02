@@ -270,12 +270,20 @@ The API appends the row to Google Sheets first, then writes `viewing_history` wi
 Start the API first, then run the React UI:
 
 ```powershell
-cd frontend
-npm install
-npm run dev
+npm --prefix frontend install
+npm --prefix frontend run dev
 ```
 
 The dev server proxies API requests to `http://127.0.0.1:8000`, so the browser should use the Vite URL printed by `npm run dev`, usually `http://127.0.0.1:5173/`.
+
+To start both the API and frontend in separate PowerShell windows:
+
+```powershell
+.\start-dev.cmd
+```
+
+Use `start-dev.cmd` if launching from File Explorer; double-clicking a `.ps1`
+file may open it in an editor instead of running it.
 
 ## Recommendation Scoring
 
@@ -286,9 +294,9 @@ The implementation provides:
 - `popularity_score`: combines Douban rating and log-scaled vote count.
 - `content_score`: builds positive and negative feature profiles from viewing history ratings.
 - `hybrid_score`: combines personal preference, public quality, and a small novelty bonus.
-- `diversity_gain`: batch-local diversity for the two explore slots.
+- `diversity_gain`: batch-local diversity for the four explore slots.
 
-See [docs/architecture.md](docs/architecture.md#recommendation-strategy) for the exact formulas and the 3 exploit / 2 explore selection rule.
+See [docs/architecture.md](docs/architecture.md#recommendation-strategy) for the exact formulas and the 4 exploit / 4 explore selection rule.
 
 To inspect recommendation output quality against PostgreSQL data, run:
 

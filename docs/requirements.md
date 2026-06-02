@@ -68,10 +68,10 @@ Course-style reinforcement learning recommendation projects are references only.
 ### Recommendation Session
 
 - A session starts only when the user clicks the recommendation action.
-- Each session returns exactly six movies.
+- Each session returns exactly eight movies.
 - The mix should be:
   - four high-confidence candidates
-  - two exploratory or diversity candidates
+  - four exploratory or diversity candidates
 - Exclude movies already in viewing history.
 - Exclude movies already in wishlist.
 - Avoid repeating recently rejected or repeatedly deferred movies unless enough time or context has changed.
@@ -151,8 +151,8 @@ The backend should support strategy switching for evaluation and debugging. The 
 MVP frontend pages:
 
 - recommendation page
-  - click to request six recommendations
-  - show six movie cards
+  - click to request eight recommendations
+  - show eight movie cards
   - capture want-to-watch, maybe-later, and not-interested feedback
 - wishlist page
   - list saved movies

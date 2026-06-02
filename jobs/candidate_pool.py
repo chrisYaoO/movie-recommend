@@ -65,6 +65,17 @@ class HistoryRecommendationDiscoverySummary:
     failed_count: int
 
 
+@dataclass(frozen=True)
+class CandidateSourceLabelRepairSummary:
+    updated_count: int
+
+
+def repair_candidate_source_labels(repository: ViewingHistoryRepository) -> CandidateSourceLabelRepairSummary:
+    return CandidateSourceLabelRepairSummary(
+        updated_count=repository.backfill_candidate_source_labels_from_movies(),
+    )
+
+
 class DoubanTop250Client:
     def __init__(
         self,
@@ -199,7 +210,7 @@ def process_candidate_queue(
                     f"[detail] existing movie_id={existing.id}, title={existing.title}",
                 )
 
-            if repository.upsert_candidate_pool_entry(movie.id, item.source_type, item.source_ref):
+            if repository.upsert_candidate_pool_entry(movie.id, item.source_type, item.source_ref, item.source_label):
                 candidate_pool_inserted_count += 1
                 _write_status(status_writer, f"[pool] inserted movie_id={movie.id}")
             else:
@@ -474,6 +485,13 @@ def main() -> None:
     history_recommendations.add_argument("--delay-seconds", type=float, default=1.0)
     history_recommendations.add_argument("--limit", type=int, default=None)
 
+    repair = subparsers.add_parser(
+        "repair-source-labels",
+        help="Backfill recommendation source labels from locally stored movie titles.",
+    )
+    repair.add_argument("--dsn", default=None)
+    repair.add_argument("--config-path", default=".env")
+
     args = parser.parse_args()
     dsn = resolve_postgres_dsn(args.dsn, args.config_path)
     repository = PostgresViewingHistoryRepository(dsn)
@@ -500,7 +518,7 @@ def main() -> None:
                 status_writer=lambda message: print(message, file=sys.stderr, flush=True),
                 queue_status=QUEUE_STATUS_FAILED if args.retry_failed else QUEUE_STATUS_PENDING,
             )
-        else:
+        elif args.command == "discover-history-recommendations":
             selenium = DoubanSeleniumDetailAdapter(
                 timeout_seconds=args.timeout_seconds,
                 delay_seconds=args.delay_seconds,
@@ -513,6 +531,8 @@ def main() -> None:
                 limit=args.limit,
                 status_writer=lambda message: print(message, file=sys.stderr, flush=True),
             )
+        else:
+            result = repair_candidate_source_labels(repository)
     finally:
         if detail_adapter is not None and hasattr(detail_adapter, "close"):
             detail_adapter.close()

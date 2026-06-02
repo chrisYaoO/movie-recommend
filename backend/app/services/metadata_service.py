@@ -184,6 +184,8 @@ def parse_douban_movie_detail(subject_id: str, html: str, url: str | None = None
     display_title = _extract_title(html)
     info_text = _extract_info_text(html)
     title = structured.get("title") or display_title or ""
+    structured_directors = structured.get("directors") or ()
+    html_directors = tuple(_extract_people_by_rel(html, "v:directedBy"))
     return DoubanMovieDetail(
         subject_id=subject_id,
         title=title,
@@ -191,9 +193,7 @@ def parse_douban_movie_detail(subject_id: str, html: str, url: str | None = None
         original_title=_extract_original_title(info_text),
         aka_titles=_extract_aka_titles(info_text),
         year=structured.get("year") or _extract_year_from_title_or_info(title, info_text),
-        directors=_normalize_directors(
-            structured.get("directors") or tuple(_extract_people_by_rel(html, "v:directedBy"))
-        ),
+        directors=structured_directors or html_directors,
         actors=structured.get("actors") or tuple(_extract_people_by_rel(html, "v:starring")),
         genres=structured.get("genres") or tuple(_extract_spans_by_property(html, "v:genre")),
         countries=_extract_labeled_values(info_text, "鍒剁墖鍥藉/鍦板尯"),
@@ -239,26 +239,6 @@ def _extract_json_ld_detail(html: str) -> dict:
         "summary": _json_text(payload.get("description")),
         "poster_url": _json_text(payload.get("image")),
     }
-
-
-def keep_origin(text: str) -> str:
-    match = re.search(r"[a-zA-Z]", text)
-    if match:
-        split_index = match.start()
-        chinese_part = text[:split_index].strip()
-        english_part = text[split_index:].strip()
-        if not chinese_part:
-            return english_part
-        if " " in english_part:
-            return english_part
-        if "\u00b7" in chinese_part or "." in chinese_part:
-            return english_part
-        return chinese_part
-    return text
-
-
-def _normalize_directors(directors: tuple[str, ...]) -> tuple[str, ...]:
-    return tuple(keep_origin(director) for director in directors if director)
 
 
 def _json_people(value) -> tuple[str, ...]:

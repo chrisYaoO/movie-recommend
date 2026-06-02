@@ -119,6 +119,53 @@ class SQLiteViewingHistoryRepositoryTest(unittest.TestCase):
                         _detail(subject_id="wrong"),
                     )
 
+    def test_backfills_candidate_source_labels_from_local_movie_titles(self) -> None:
+        with TemporaryDirectory() as directory:
+            db_path = Path(directory) / "movies.db"
+            with SQLiteViewingHistoryRepository(db_path) as repository:
+                repository.initialize_schema()
+                source_movie = repository.upsert_movie_detail(_detail(subject_id="source-1"))
+                candidate_movie = repository.upsert_movie_detail(_detail(subject_id="candidate-1"))
+                repository.upsert_candidate_subject(
+                    "candidate-2",
+                    "douban_recommendation",
+                    "recommended_from:source-1",
+                )
+                repository.upsert_candidate_pool_entry(
+                    candidate_movie.id,
+                    "douban_recommendation",
+                    "recommended_from:source-1",
+                )
+                repository.upsert_candidate_subject(
+                    "candidate-3",
+                    "douban_recommendation",
+                    "recommended_from:missing-source",
+                )
+
+                updated_count = repository.backfill_candidate_source_labels_from_movies()
+                queue_rows = repository.connection.execute(
+                    """
+                    SELECT douban_subject_id, source_label
+                    FROM candidate_subject_queue
+                    ORDER BY douban_subject_id
+                    """
+                ).fetchall()
+                pool_row = repository.connection.execute(
+                    "SELECT source_label FROM candidate_pool WHERE movie_id = ?",
+                    (candidate_movie.id,),
+                ).fetchone()
+
+        self.assertEqual("source-1", source_movie.douban_subject_id)
+        self.assertEqual(2, updated_count)
+        self.assertEqual(
+            [
+                ("candidate-2", "recommended from Thelma and Louise"),
+                ("candidate-3", None),
+            ],
+            [(row["douban_subject_id"], row["source_label"]) for row in queue_rows],
+        )
+        self.assertEqual("recommended from Thelma and Louise", pool_row["source_label"])
+
 
 def _confirmed(
     subject_id: str = "1291992",

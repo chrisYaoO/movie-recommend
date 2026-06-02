@@ -9,7 +9,8 @@ export default defineConfig({
       "/movies": "http://127.0.0.1:8000",
       "/viewing-history": "http://127.0.0.1:8000",
       "/recommendations": "http://127.0.0.1:8000",
-      "/wishlist": "http://127.0.0.1:8000"
+      "/wishlist": "http://127.0.0.1:8000",
+      "/not-interested": "http://127.0.0.1:8000"
     }
   }
 });

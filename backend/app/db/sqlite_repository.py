@@ -88,6 +88,7 @@ class SQLiteViewingHistoryRepository:
                 movie_id TEXT NOT NULL REFERENCES movies(id),
                 source_type TEXT NOT NULL,
                 source_ref TEXT NOT NULL,
+                source_label TEXT,
                 active INTEGER NOT NULL,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
@@ -138,7 +139,7 @@ class SQLiteViewingHistoryRepository:
 
     def find_movie_by_subject_id(self, subject_id: str) -> PersistedMovie | None:
         row = self.connection.execute(
-            "SELECT id, douban_subject_id, title FROM movies WHERE douban_subject_id = ?",
+            "SELECT id, douban_subject_id, title, year, directors_json, poster_url FROM movies WHERE douban_subject_id = ?",
             (subject_id,),
         ).fetchone()
         if row is None:
@@ -147,6 +148,9 @@ class SQLiteViewingHistoryRepository:
             id=str(row["id"]),
             douban_subject_id=str(row["douban_subject_id"]),
             title=str(row["title"]),
+            year=int(row["year"]) if row["year"] is not None else None,
+            directors=tuple(str(item) for item in json.loads(row["directors_json"] or "[]")),
+            poster_url=str(row["poster_url"]) if row["poster_url"] is not None else None,
         )
 
     def find_watched_movies(self, limit: int | None = None) -> list[PersistedMovie]:
@@ -329,7 +333,14 @@ class SQLiteViewingHistoryRepository:
             ),
         )
         self.connection.commit()
-        return PersistedMovie(id=movie_id, douban_subject_id=detail.subject_id, title=detail.title)
+        return PersistedMovie(
+            id=movie_id,
+            douban_subject_id=detail.subject_id,
+            title=detail.title,
+            year=detail.year,
+            directors=detail.directors,
+            poster_url=detail.poster_url,
+        )
 
     def upsert_viewing_history(
         self,
@@ -464,7 +475,13 @@ class SQLiteViewingHistoryRepository:
         )
         self.connection.commit()
 
-    def upsert_candidate_pool_entry(self, movie_id: str, source_type: str, source_ref: str) -> bool:
+    def upsert_candidate_pool_entry(
+        self,
+        movie_id: str,
+        source_type: str,
+        source_ref: str,
+        source_label: str | None = None,
+    ) -> bool:
         existing = self.connection.execute(
             """
             SELECT id FROM candidate_pool
@@ -477,17 +494,60 @@ class SQLiteViewingHistoryRepository:
         self.connection.execute(
             """
             INSERT INTO candidate_pool (
-                id, movie_id, source_type, source_ref, active, created_at, updated_at
+                id, movie_id, source_type, source_ref, source_label, active, created_at, updated_at
             )
-            VALUES (?, ?, ?, ?, 1, ?, ?)
+            VALUES (?, ?, ?, ?, ?, 1, ?, ?)
             ON CONFLICT(movie_id, source_type, source_ref) DO UPDATE SET
+                source_label = COALESCE(excluded.source_label, candidate_pool.source_label),
                 active = 1,
                 updated_at = excluded.updated_at
             """,
-            (pool_id, movie_id, source_type, source_ref, now, now),
+            (pool_id, movie_id, source_type, source_ref, source_label, now, now),
         )
         self.connection.commit()
         return existing is None
+
+    def backfill_candidate_source_labels_from_movies(self) -> int:
+        queue_cursor = self.connection.execute(
+            """
+            UPDATE candidate_subject_queue
+            SET source_label = (
+                    SELECT 'recommended from ' || movies.title
+                    FROM movies
+                    WHERE movies.douban_subject_id = substr(candidate_subject_queue.source_ref, length('recommended_from:') + 1)
+                ),
+                updated_at = ?
+            WHERE source_ref LIKE 'recommended_from:%'
+              AND (source_label IS NULL OR source_label = '')
+              AND EXISTS (
+                    SELECT 1
+                    FROM movies
+                    WHERE movies.douban_subject_id = substr(candidate_subject_queue.source_ref, length('recommended_from:') + 1)
+              )
+            """,
+            (_utc_now(),),
+        )
+        pool_cursor = self.connection.execute(
+            """
+            UPDATE candidate_pool
+            SET source_label = (
+                    SELECT 'recommended from ' || movies.title
+                    FROM movies
+                    WHERE movies.douban_subject_id = substr(candidate_pool.source_ref, length('recommended_from:') + 1)
+                ),
+                updated_at = ?
+            WHERE source_ref LIKE 'recommended_from:%'
+              AND (source_label IS NULL OR source_label = '')
+              AND EXISTS (
+                    SELECT 1
+                    FROM movies
+                    WHERE movies.douban_subject_id = substr(candidate_pool.source_ref, length('recommended_from:') + 1)
+              )
+            """,
+            (_utc_now(),),
+        )
+        self.connection.commit()
+        return int(queue_cursor.rowcount or 0) + int(pool_cursor.rowcount or 0)
 
 
 def _json(value) -> str:
