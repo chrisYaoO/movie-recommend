@@ -213,6 +213,34 @@ class MetadataServiceTest(unittest.TestCase):
         self.assertEqual(353101, detail.douban_vote_count)
         self.assertEqual(1, driver.quit_count)
 
+    def test_selenium_detail_adapter_reuses_prewarmed_driver_for_fetch(self) -> None:
+        html = """
+        <html>
+          <body>
+            <span property="v:itemreviewed">Prewarmed Movie</span>
+            <div id="info">制片国家/地区: 中国 上映日期: 2021-10-01</div>
+          </body>
+        </html>
+        """
+        driver = _FakeWebDriver(html)
+        created_drivers = []
+
+        def create_driver():
+            created_drivers.append(driver)
+            return driver
+
+        with DoubanSeleniumDetailAdapter(
+            delay_seconds=0,
+            driver_factory=create_driver,
+            wait_for_json_ld=False,
+        ) as adapter:
+            adapter.prewarm()
+            detail = adapter.fetch("35030151")
+
+        self.assertEqual("Prewarmed Movie", detail.title)
+        self.assertEqual([driver], created_drivers)
+        self.assertEqual(1, driver.quit_count)
+
     def test_selenium_detail_adapter_continues_after_json_ld_wait_timeout(self) -> None:
         html = """
         <html>

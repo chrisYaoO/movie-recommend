@@ -1,5 +1,7 @@
 # Frontend Checklist
 
+This document is the execution record for completed frontend slices and the source of truth for remaining frontend and desktop performance targets. Use `README.md` for setup and routine operation.
+
 ## Purpose
 
 Plan the next frontend iteration for the existing thin React app. This slice now includes the previous Later Targets plus the newly confirmed requirements:
@@ -282,7 +284,71 @@ Why seventh: the frontend should switch Refresh/debug behavior only after backen
 
 ## Later Targets
 
-- [ ] Tune poster loading polish after real use.
+### Current Performance Solution Plan
+
+Recommended implementation order:
+
+1. [x] Optimize recommendation Refresh scoring.
+   - Build the positive/negative viewing-history preference profile once per recommendation run.
+   - Pass the precomputed profile into candidate scoring instead of rebuilding it for every candidate.
+   - Preserve the current scoring formula and verify old/new scores are equivalent with regression tests.
+   - Completed result on the current dataset: all-candidate scoring dropped from about `5804ms` to `15.3ms`; full recommendation generation measured about `167ms`; API route generation plus serialization measured `164.5-185.3ms`.
+2. [x] Fix desktop poster requests.
+   - Inject `Referer: https://movie.douban.com/` for `img*.doubanio.com` requests through Electron `session.webRequest`.
+   - Add clear loading and failed-image states.
+   - Add a bounded local-disk poster cache only if repeat-view loading remains noticeably slow after the Referer fix.
+   - Completed result: real Electron smoke produced eight HTTP 200 poster responses, zero failed loaded images, and no HTTP 418 responses; two hidden/lazy images remained pending and had not been requested.
+3. [x] Cache Google Sheets service-account credentials.
+   - Keep one credentials object on the long-lived `GoogleSheetsValuesAppendService`.
+   - Reuse the current token until it is near expiry; refresh and retry only when required.
+   - Keep the Google Sheets append synchronous so a successful form response still proves the source-of-truth write completed.
+   - Completed result: real first token refresh measured about `1815.5ms`; the second cached lookup measured `0.017ms` and reused the same token.
+   - Implemented one forced refresh and retry after a 401 response.
+4. Improve missing-movie form submissions.
+   - [x] Prewarm and reuse the Selenium driver after desktop startup.
+     - Desktop mode starts prewarm in a background FastAPI lifespan thread, so Electron first paint is not blocked.
+     - `MOVIES_PREWARM_RECORD_SELENIUM=0` disables prewarm when needed.
+     - The shared adapter serializes driver use, reuses the prewarmed driver for fetch, and closes it during backend shutdown/process-tree cleanup.
+     - Verified real result: first prewarm about `1795.8ms`; reuse about `0.002ms`; no residual headless Chrome, chromedriver, or uvicorn process after close.
+   - Also evaluate fetching missing metadata immediately after the user selects a non-canonical search result, so submit can reuse the completed result.
+   - Do not move canonical movie creation to an asynchronous queue without an explicit architecture decision.
+5. Improve perceived submit latency.
+   - Show granular states such as `Preparing movie`, `Writing Google Sheets`, and `Saving locally`.
+   - Keep the form draft until the full operation succeeds.
+6. Package the desktop app as a direct executable/installer after the higher-impact runtime work.
+   - Remove the remaining `.cmd -> PowerShell -> Node` launch overhead while preserving close-to-exit behavior.
+
+- [ ] Package the desktop app as a direct executable/installer to reduce the remaining Electron cold-start and `.cmd -> PowerShell -> Node` launcher overhead.
+  - Confirmed after the parallel-start optimization: React first paint is about `1.48-1.59s`; backend readiness is about `2.26-2.34s`.
+  - Treat installer/direct-executable packaging as the next startup optimization rather than changing close-to-exit semantics.
+- [x] Diagnose and improve poster loading reliability and perceived speed in the desktop app.
+  - Confirmed metadata coverage: `2372 / 2395` current movies have `poster_url`; only 23 are missing.
+  - Confirmed remote-host behavior: without a Douban Referer, 9 of 12 sampled `img*.doubanio.com` requests returned HTTP 418; with `Referer: https://movie.douban.com/`, all 12 returned 200.
+  - Confirmed successful remote image responses still took about `0.1-1.0s`.
+  - Implemented first slice: Electron injects the Douban Referer for matching poster requests, and cards expose distinct loading/failed presentation.
+  - Verified real desktop result: eight requested posters returned HTTP 200; DOM state was 8 loaded, 0 failed, and 2 hidden/lazy images pending.
+  - Deferred follow-up: add a bounded local-disk poster cache only if repeat-view loading remains noticeable after real use.
+- [x] Reduce recommendation Refresh latency.
+  - Confirmed current dataset: 1,909 eligible candidates, 478 viewing-history rows, and 2,395 movies.
+  - Confirmed bottleneck: repository refresh took about `129ms`, while scoring all candidates took about `5804ms`.
+  - Root cause: `content_score()` rebuilds the same positive/negative history profile for every candidate.
+  - Confirmed optimization potential: build the history profile once, then score all candidate content features; measured prototype time was about `15ms` for the same candidate set.
+  - Implemented: one reusable/precomputed content profile per recommendation run, with score-equivalence and single-build regression coverage.
+  - Verified result: full recommendation generation about `167ms`; API route generation plus serialization `164.5-185.3ms`.
+  - Preserve the current contract that production Refresh creates a new recommendation session.
+- [ ] Reduce Add watched form-submit latency.
+  - Confirmed existing canonical movie lookup is negligible at about `0.7ms`.
+  - Confirmed fixed remote cost: Google access-token refresh took about `1.8-2.2s`, and a read-only Sheets request took about `0.68s`.
+  - Root cause for existing movies: `GoogleSheetsValuesAppendService` refreshes a new service-account token for every append; no credential/token cache currently exists.
+  - Implemented first slice: the long-lived Sheets service caches refreshable credentials, reuses valid tokens, and refreshes/retries once after a 401.
+  - Verified token result: first refresh about `1815.5ms`; cached lookup `0.017ms`.
+  - Confirmed missing-movie cost: starting the current headless Selenium driver alone took about `5.41s`, before loading the Douban detail page.
+  - Implemented desktop background prewarm and shared-driver reuse; a later real measurement after driver/browser caches were warm showed first prewarm about `1795.8ms` and reuse about `0.002ms`.
+  - Verified prewarm does not block Electron first paint and app close leaves no residual headless Chrome, chromedriver, or uvicorn process.
+  - Existing `DoubanHttpDetailAdapter` is not a reliable direct replacement: one real sample took about `2.12s` and then failed because the returned page lacked movie metadata.
+  - Recommended missing-movie options to evaluate separately: prewarm/reuse Selenium after desktop startup, or begin detail enrichment after the user selects a non-canonical search result so submit can reuse it.
+  - Add granular submit status such as writing Google Sheets / fetching missing metadata so unavoidable remote work is visible.
+  - Preserve Google Sheets as the watched-history source of truth and keep missing canonical movie creation synchronous unless that architecture decision is explicitly changed.
 - [ ] Add richer recommendation explanations/debug panels beyond the current debug mode.
 - [ ] Add advanced Wishlist and Not interested filters if simple text filtering is not enough.
 - [ ] Add longer-term maybe-later learning once enough interaction data exists.

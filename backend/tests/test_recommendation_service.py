@@ -5,6 +5,7 @@ import unittest
 from unittest.mock import patch
 
 from backend.app.models.domain import FeedbackType, Movie, RecommendationProcessingStatus, SlotType, WishlistStatus
+from backend.app.recommenders.simple import build_content_profile
 from backend.app.services.recommendation_service import (
     FeedbackRequest,
     InMemoryMovieRepository,
@@ -29,6 +30,15 @@ class RecommendationServiceTest(unittest.TestCase):
         self.assertEqual(4, sum(1 for item in session.items if item.slot_type == SlotType.EXPLOIT))
         self.assertEqual(4, sum(1 for item in session.items if item.slot_type == SlotType.EXPLORE))
         self.assertEqual(8, len({item.movie.id for item in session.items}))
+
+    def test_hybrid_recommendation_builds_content_profile_once(self) -> None:
+        with patch(
+            "backend.app.services.recommendation_service.build_content_profile",
+            wraps=build_content_profile,
+        ) as build_profile:
+            self.service.recommend("hybrid")
+
+        build_profile.assert_called_once_with(self.repository.history, self.repository.movies_by_id)
 
     def test_recommendation_excludes_movies_newer_than_current_year(self) -> None:
         future_movie = Movie(

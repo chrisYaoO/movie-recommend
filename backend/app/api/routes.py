@@ -1,4 +1,5 @@
 import os
+from threading import Lock
 
 from fastapi import APIRouter, HTTPException, Query
 
@@ -14,7 +15,9 @@ from jobs.sync_google_sheets_history import resolve_service_account_file, resolv
 router = APIRouter()
 movie_search_service = create_movie_search_service()
 viewing_history_record_service: ViewingHistoryRecordService | None = None
+viewing_history_record_service_lock = Lock()
 RECORD_CHROME_BINARY_ENV = "MOVIES_RECORD_CHROME_BINARY_PATH"
+PREWARM_RECORD_SELENIUM_ENV = "MOVIES_PREWARM_RECORD_SELENIUM"
 
 
 def create_record_detail_adapter():
@@ -24,23 +27,48 @@ def create_record_detail_adapter():
 
 def get_viewing_history_record_service() -> ViewingHistoryRecordService:
     global viewing_history_record_service
-    if viewing_history_record_service is None:
-        config_path = ".env"
-        spreadsheet_id = resolve_spreadsheet_id(config_path)
-        service_account_file = resolve_service_account_file(config_path)
-        if not spreadsheet_id or not service_account_file:
-            raise RuntimeError("Google Sheets spreadsheet id and service account file are required")
-        repository = PostgresViewingHistoryRepository(resolve_postgres_dsn(None, config_path))
-        repository.initialize_schema()
-        viewing_history_record_service = ViewingHistoryRecordService(
-            repository=repository,
-            detail_adapter=create_record_detail_adapter(),
-            sheets=GoogleSheetsValuesAppendService(
-                spreadsheet_id=spreadsheet_id,
-                service_account_file=service_account_file,
-            ),
-        )
+    if viewing_history_record_service is not None:
+        return viewing_history_record_service
+    with viewing_history_record_service_lock:
+        if viewing_history_record_service is None:
+            config_path = ".env"
+            spreadsheet_id = resolve_spreadsheet_id(config_path)
+            service_account_file = resolve_service_account_file(config_path)
+            if not spreadsheet_id or not service_account_file:
+                raise RuntimeError("Google Sheets spreadsheet id and service account file are required")
+            repository = PostgresViewingHistoryRepository(resolve_postgres_dsn(None, config_path))
+            repository.initialize_schema()
+            viewing_history_record_service = ViewingHistoryRecordService(
+                repository=repository,
+                detail_adapter=create_record_detail_adapter(),
+                sheets=GoogleSheetsValuesAppendService(
+                    spreadsheet_id=spreadsheet_id,
+                    service_account_file=service_account_file,
+                ),
+            )
     return viewing_history_record_service
+
+
+def should_prewarm_record_selenium() -> bool:
+    configured = os.getenv(PREWARM_RECORD_SELENIUM_ENV)
+    if configured is not None:
+        return configured.strip().lower() not in {"0", "false", "no", "off"}
+    return os.getenv("MOVIES_DESKTOP") == "1"
+
+
+def prewarm_viewing_history_record_service() -> None:
+    get_viewing_history_record_service().detail_adapter.prewarm()
+
+
+def close_viewing_history_record_service() -> None:
+    global viewing_history_record_service
+    with viewing_history_record_service_lock:
+        record_service = viewing_history_record_service
+        viewing_history_record_service = None
+    if record_service is None:
+        return
+    record_service.detail_adapter.close()
+    record_service.repository.close()
 
 
 @router.get("/movies/search")

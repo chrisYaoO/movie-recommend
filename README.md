@@ -6,27 +6,20 @@ The product direction is documented in [CONTEXT.md](CONTEXT.md), with detailed r
 
 ## Current Status
 
-This repository currently contains the first backend vertical slice:
+The current application is a local Electron desktop app backed by React, FastAPI, PostgreSQL, Google Sheets, and offline Douban enrichment jobs.
 
-- core movie, feedback, wishlist, and recommendation session domain models
-- an in-memory repository seeded with sample movie data
-- popularity, content-based, and hybrid recommendation scoring
-- on-demand recommendation sessions that return exactly five movies
-- three exploit slots and two explore slots per recommendation session
-- feedback handling for `want_to_watch`, `maybe_later`, `not_interested`, and `opened_douban`
-- wishlist creation from `want_to_watch`
-- recording a wishlist movie as watched
-- raw viewing-history import from the confirmed Excel column shape
-- `.xlsx` reading through `openpyxl`
-- stable raw-row hashes so repeated imports can skip duplicates
-- Douban match input generation, confidence scoring, and manual subject-id confirmation
-- Douban subject detail parsing and Selenium-backed enrichment job support
-- SQLite persistence for canonical `movies` and final `viewing_history`
-- PostgreSQL repository support for the same `movies` and `viewing_history` contract
-- PostgreSQL-backed recommendation reads from `movies`, `candidate_pool`, and `viewing_history`
-- focused unit tests for the core recommendation loop
+Implemented workflows:
 
-This slice still keeps live recommendation independent from Douban. External access belongs in import and enrichment jobs only.
+- request eight recommendations: four exploit and four explore
+- record want-to-watch, maybe-later, and not-interested feedback
+- manage wishlist and not-interested state
+- search for a movie and record it as watched
+- append watched records to Google Sheets before persisting local state
+- synchronously create missing canonical watched movies
+- build and enrich a resumable local recommendation candidate pool
+- run the same UI in a browser during development or in an Electron desktop window
+
+Live recommendation reads local PostgreSQL data only. The only synchronous external calls in the interactive workflow are Google Sheets writes and missing watched-movie metadata retrieval.
 
 ## Project Layout
 
@@ -40,6 +33,8 @@ backend/
   tests/             Backend unit tests
 docs/                Requirements, architecture, and agent workflow docs
 frontend/            React UI for recommendations, search, and recording history
+desktop/             Electron lifecycle, preload bridge, and request policy
+jobs/                Google Sheets sync, rebuild, enrichment, and evaluation jobs
 ```
 
 ## Setup
@@ -63,10 +58,10 @@ pip install -r requirements-dev.txt
 .\.venv\Scripts\python.exe -m unittest discover -s backend\tests
 ```
 
-Expected result:
+Current expected result:
 
 ```text
-Ran 118 tests
+Ran 172 tests
 
 OK (skipped=3)
 ```
@@ -77,6 +72,47 @@ The skipped tests are optional PostgreSQL integration tests. To run them, instal
 $env:MOVIES_POSTGRES_DSN="postgresql://user:password@localhost:5432/movies_test"
 .\.venv\Scripts\python.exe -m unittest backend.tests.test_postgres_repository
 ```
+
+## Run As A Desktop App
+
+The desktop app uses Electron as a native window around the existing React frontend and FastAPI backend. It reuses the local `.venv` backend, so the normal Python setup above is still required.
+
+Install the desktop dependencies once:
+
+```powershell
+Push-Location frontend
+npm install
+Pop-Location
+
+Push-Location desktop
+npm install
+Pop-Location
+```
+
+Build the frontend once:
+
+```powershell
+Push-Location frontend
+npm run build
+Pop-Location
+```
+
+Then double-click `start-app.cmd` from File Explorer, or run:
+
+```powershell
+.\start-app.cmd
+```
+
+The Electron window starts the backend automatically on `127.0.0.1:8000`, loads the built frontend, and shuts down the backend when the app window closes.
+
+Desktop mode also prewarms the shared headless Selenium driver in the background so the first Add watched submission for a missing canonical movie does not pay the Chrome startup cost. To disable that behavior for a run:
+
+```powershell
+$env:MOVIES_PREWARM_RECORD_SELENIUM="0"
+.\start-app.cmd
+```
+
+See [docs/desktop.md](docs/desktop.md) for lifecycle behavior, performance notes, and troubleshooting.
 
 ## Import And Rebuild Viewing History
 
@@ -246,9 +282,13 @@ Useful endpoints in the current slice:
 - `GET /recommendations?strategy=hybrid&seed=42`
 - `GET /recommendations?strategy=popularity`
 - `GET /recommendations?strategy=content`
+- `GET /recommendations/{session_id}`
 - `POST /recommendations/{session_id}/items/{item_id}/feedback`
 - `GET /wishlist`
 - `POST /wishlist/{wishlist_id}/watched`
+- `DELETE /wishlist/{wishlist_id}`
+- `GET /not-interested`
+- `DELETE /not-interested/{movie_id}`
 
 To record a watched movie selected from search:
 
@@ -318,11 +358,12 @@ The report prints:
 
 Use this as the daily check after each candidate-pool batch. The first hard gates are `watched_leak_count=0`, `duplicate_in_session_count=0`, and `eligible_unique_movies >= 5`; after the pool grows, watch whether `repeated_movies` and `active_source_mix` show over-concentration.
 
-## Next Tasks
+## Project Documents
 
-Recommended next implementation order:
-
-1. Wire the React UI to the PostgreSQL-backed API in a local end-to-end run.
-2. Add the final "record watched" validation states around Google Sheets write failures and duplicate local rows.
-3. Persist wishlist and feedback against PostgreSQL instead of keeping them process-local.
-4. Continue candidate-pool enrichment and use `jobs.evaluate_recommendations` as the daily health check.
+- [CONTEXT.md](CONTEXT.md): product boundaries and domain decisions
+- [docs/requirements.md](docs/requirements.md): current functional requirements
+- [docs/architecture.md](docs/architecture.md): data flow, persistence, APIs, and recommendation mechanics
+- [docs/desktop.md](docs/desktop.md): Electron runtime and lifecycle
+- [docs/technical-debt.md](docs/technical-debt.md): prioritized correctness, security, and maintainability risks
+- [docs/checklists/frontend-performance-checklist.md](docs/checklists/frontend-performance-checklist.md): completed frontend slices and remaining performance work
+- [docs/checklists/database-rebuild-checklist.md](docs/checklists/database-rebuild-checklist.md): database rebuild history and verification

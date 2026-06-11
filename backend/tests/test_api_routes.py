@@ -1,18 +1,21 @@
 ﻿import unittest
 from datetime import date
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import backend.app.api.routes as routes
 from backend.app.api.routes import (
     clear_not_interested,
+    close_viewing_history_record_service,
     get_not_interested,
     get_recommendations,
     get_recommendation_session,
     get_wishlist,
+    prewarm_viewing_history_record_service,
     record_viewing_history,
     remove_from_wishlist,
     search_movies,
+    should_prewarm_record_selenium,
 )
 from backend.app.models.domain import RecommendationProcessingStatus, WishlistStatus
 from backend.app.services.metadata_service import DoubanSeleniumDetailAdapter
@@ -29,6 +32,38 @@ class ApiRoutesTest(unittest.TestCase):
             self.assertIsInstance(adapter, DoubanSeleniumDetailAdapter)
         finally:
             adapter.close()
+
+    def test_desktop_mode_prewarms_record_selenium_by_default(self) -> None:
+        with patch.dict("os.environ", {"MOVIES_DESKTOP": "1"}, clear=True):
+            self.assertTrue(should_prewarm_record_selenium())
+
+    def test_record_selenium_prewarm_can_be_disabled(self) -> None:
+        with patch.dict(
+            "os.environ",
+            {"MOVIES_DESKTOP": "1", "MOVIES_PREWARM_RECORD_SELENIUM": "0"},
+            clear=True,
+        ):
+            self.assertFalse(should_prewarm_record_selenium())
+
+    def test_prewarm_initializes_the_shared_record_service_adapter(self) -> None:
+        fake_service = SimpleNamespace(detail_adapter=SimpleNamespace(prewarm=Mock()))
+
+        with patch("backend.app.api.routes.get_viewing_history_record_service", return_value=fake_service):
+            prewarm_viewing_history_record_service()
+
+        fake_service.detail_adapter.prewarm.assert_called_once_with()
+
+    def test_close_record_service_closes_adapter_and_repository(self) -> None:
+        fake_service = SimpleNamespace(
+            detail_adapter=SimpleNamespace(close=Mock()),
+            repository=SimpleNamespace(close=Mock()),
+        )
+
+        with patch("backend.app.api.routes.viewing_history_record_service", fake_service):
+            close_viewing_history_record_service()
+
+        fake_service.detail_adapter.close.assert_called_once_with()
+        fake_service.repository.close.assert_called_once_with()
 
     def test_search_movies_returns_candidates(self) -> None:
         fake_service = _FakeMovieSearchService(

@@ -21,6 +21,9 @@ If an expected file does not exist, proceed silently. Do not suggest creating it
 |-- docs/
 |   |-- requirements.md
 |   |-- architecture.md
+|   |-- desktop.md
+|   |-- technical-debt.md
+|   |-- checklists/
 |   `-- adr/
 ```
 
@@ -45,6 +48,8 @@ Important current terms include:
 - Hybrid Ranking Signals
 - Technical Stack
 - MVP Boundary
+
+Long-lived execution checklists and measured follow-up targets belong under `docs/checklists/`. `.scratch/` remains the local issue tracker and temporary-work area.
 
 ## ADR Conflicts
 

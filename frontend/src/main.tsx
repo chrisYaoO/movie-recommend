@@ -754,6 +754,7 @@ function SharedMovieCard({
   children?: React.ReactNode;
 }) {
   const [posterFailed, setPosterFailed] = useState(false);
+  const [posterLoaded, setPosterLoaded] = useState(false);
   const directors = useMemo(
     () => formatPersonNames(movie.directors?.length ? movie.directors : [movie.director]),
     [movie]
@@ -764,6 +765,7 @@ function SharedMovieCard({
 
   useEffect(() => {
     setPosterFailed(false);
+    setPosterLoaded(false);
   }, [movie.poster_url]);
 
   return (
@@ -773,9 +775,19 @@ function SharedMovieCard({
         <span>Douban {movie.douban_rating.toFixed(1)}</span>
       </div>
       {showPoster && movie.poster_url ? (
-        <img className="poster-image" src={movie.poster_url} alt="" loading="lazy" onError={() => setPosterFailed(true)} />
+        <img
+          className={posterLoaded ? "poster-image loaded" : "poster-image loading"}
+          src={movie.poster_url}
+          alt=""
+          loading="lazy"
+          onLoad={() => setPosterLoaded(true)}
+          onError={() => {
+            setPosterLoaded(false);
+            setPosterFailed(true);
+          }}
+        />
       ) : (
-        <div className="poster-placeholder" aria-hidden="true" />
+        <div className={posterFailed ? "poster-placeholder failed" : "poster-placeholder"} aria-hidden="true" />
       )}
       <h3>
         <a href={movie.douban_url} target="_blank" rel="noreferrer">
@@ -798,7 +810,8 @@ function StatusText({ value }: { value: string }) {
 }
 
 async function api<T>(path: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(path, {
+  await window.moviesDesktop?.waitForBackend();
+  const response = await fetch(apiUrl(path), {
     ...init,
     headers: {
       "Content-Type": "application/json",
@@ -814,6 +827,12 @@ async function api<T>(path: string, init?: RequestInit): Promise<T> {
     throw new Error(`Expected JSON from ${path}, got ${contentType || "unknown content type"}`);
   }
   return response.json() as Promise<T>;
+}
+
+function apiUrl(path: string) {
+  if (/^https?:\/\//.test(path)) return path;
+  const baseUrl = window.moviesDesktop?.apiBaseUrl || import.meta.env.VITE_API_BASE_URL || "";
+  return baseUrl ? `${baseUrl}${path}` : path;
 }
 
 function errorMessage(error: unknown) {

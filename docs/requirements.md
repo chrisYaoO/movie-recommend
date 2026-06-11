@@ -13,7 +13,7 @@ Course-style reinforcement learning recommendation projects are references only.
 3. Enrich matched movies and candidate movies with metadata.
 4. Store cleaned history, candidates, feedback, and wishlist state in PostgreSQL.
 5. User clicks a recommendation action in the frontend.
-6. System returns exactly six unseen and non-wishlist movies.
+6. System returns exactly eight unseen and non-wishlist movies.
 7. User marks each recommendation as want-to-watch, maybe-later, or not-interested.
 8. Want-to-watch movies enter the wishlist.
 9. When a wishlist movie is watched, the user records rating, quality, comment, and watched date.
@@ -158,26 +158,30 @@ MVP frontend pages:
   - list saved movies
   - open Douban URL
   - record watched movie with rating, quality, comment, and date
-- review queue page
-  - resolve low-confidence Douban matches
+- not-interested page
+  - list and clear current negative-interest state
+- Add watched page
+  - search by title, Douban subject ID, or Douban URL
+  - append the watched record to Google Sheets and persist it locally
 
 ### Backend API
 
-Required API capabilities:
+Current interactive API capabilities:
 
-- import viewing history
-- view import and match status
-- resolve match candidates
-- trigger metadata enrichment
+- search movies
 - request recommendations by strategy
+- restore a recommendation session
 - submit recommendation feedback
 - manage wishlist
+- manage current not-interested state
 - record watched movie
+
+Import, matching, metadata enrichment, candidate-pool processing, and evaluation remain resumable CLI jobs rather than HTTP admin endpoints.
 
 ## Non-Functional Requirements
 
 - Recommendation response should read local PostgreSQL data only.
-- External web access must be limited to import and enrichment jobs.
+- Live recommendation must not require external web access. The interactive Add watched workflow may synchronously write Google Sheets and fetch metadata for a missing canonical watched movie.
 - Import jobs should be resumable.
 - Douban access should be low-speed and cached.
 - The system should preserve raw external payloads for debugging.

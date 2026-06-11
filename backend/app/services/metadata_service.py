@@ -3,6 +3,7 @@
 from html import unescape
 import json
 import re
+from threading import RLock
 import time
 from typing import Protocol
 from urllib.request import Request, urlopen
@@ -98,33 +99,40 @@ class DoubanSeleniumDetailAdapter:
         self.last_request_at = 0.0
         self._last_page_source: str | None = None
         self.driver = None
+        self.driver_lock = RLock()
 
     def fetch(self, subject_id: str) -> DoubanMovieDetail:
-        self._throttle()
-        url = f"https://movie.douban.com/subject/{subject_id}/"
-        driver = self._ensure_driver()
-        driver.get(url)
-        if self.wait_for_json_ld:
-            try:
-                self._wait_until_detail_loaded(driver)
-            except TimeoutException:
-                pass
-        self.last_request_at = time.monotonic()
-        self._last_page_source = driver.page_source
+        with self.driver_lock:
+            self._throttle()
+            url = f"https://movie.douban.com/subject/{subject_id}/"
+            driver = self._ensure_driver()
+            driver.get(url)
+            if self.wait_for_json_ld:
+                try:
+                    self._wait_until_detail_loaded(driver)
+                except TimeoutException:
+                    pass
+            self.last_request_at = time.monotonic()
+            self._last_page_source = driver.page_source
 
-        detail = parse_douban_movie_detail(subject_id, driver.page_source, url)
-        if _is_invalid_detail_title(detail.title):
-            raise ValueError("Douban detail page did not contain movie metadata")
-        return detail
+            detail = parse_douban_movie_detail(subject_id, driver.page_source, url)
+            if _is_invalid_detail_title(detail.title):
+                raise ValueError("Douban detail page did not contain movie metadata")
+            return detail
 
     @property
     def last_page_source(self) -> str | None:
         return self._last_page_source
 
+    def prewarm(self) -> None:
+        with self.driver_lock:
+            self._ensure_driver()
+
     def close(self) -> None:
-        if self.driver is not None:
-            self.driver.quit()
-            self.driver = None
+        with self.driver_lock:
+            if self.driver is not None:
+                self.driver.quit()
+                self.driver = None
 
     def __enter__(self):
         return self

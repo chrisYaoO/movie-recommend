@@ -2,8 +2,15 @@ from __future__ import annotations
 
 import math
 from collections import Counter
+from dataclasses import dataclass
 
 from backend.app.models.domain import Movie, ViewingHistory
+
+
+@dataclass(frozen=True)
+class ContentProfile:
+    positive: Counter[str]
+    negative: Counter[str]
 
 
 def popularity_score(movie: Movie) -> float:
@@ -12,6 +19,10 @@ def popularity_score(movie: Movie) -> float:
 
 
 def content_score(movie: Movie, history: list[ViewingHistory], movies_by_id: dict[str, Movie]) -> float:
+    return content_score_from_profile(movie, build_content_profile(history, movies_by_id))
+
+
+def build_content_profile(history: list[ViewingHistory], movies_by_id: dict[str, Movie]) -> ContentProfile:
     positive_profile: Counter[str] = Counter()
     negative_profile: Counter[str] = Counter()
 
@@ -26,15 +37,28 @@ def content_score(movie: Movie, history: list[ViewingHistory], movies_by_id: dic
         else:
             negative_profile.update({feature: 1.0 for feature in features})
 
+    return ContentProfile(positive=positive_profile, negative=negative_profile)
+
+
+def content_score_from_profile(movie: Movie, profile: ContentProfile) -> float:
     features = _features(movie)
-    positive = sum(positive_profile[feature] for feature in features)
-    negative = sum(negative_profile[feature] for feature in features)
+    positive = sum(profile.positive[feature] for feature in features)
+    negative = sum(profile.negative[feature] for feature in features)
     normalizer = max(len(features), 1)
     return (positive - negative) / normalizer
 
 
-def hybrid_score(movie: Movie, history: list[ViewingHistory], movies_by_id: dict[str, Movie]) -> dict[str, float]:
-    personal = content_score(movie, history, movies_by_id)
+def hybrid_score(
+    movie: Movie,
+    history: list[ViewingHistory],
+    movies_by_id: dict[str, Movie],
+    content_profile: ContentProfile | None = None,
+) -> dict[str, float]:
+    personal = (
+        content_score_from_profile(movie, content_profile)
+        if content_profile is not None
+        else content_score(movie, history, movies_by_id)
+    )
     public = popularity_score(movie)
     novelty = 0.3 if movie.douban_vote_count < 100000 else 0.0
     total = personal * 0.45 + public * 0.45 + novelty * 0.10

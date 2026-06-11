@@ -1,0 +1,14 @@
+{
+  "name": "movies-desktop",
+  "private": true,
+  "version": "0.1.0",
+  "main": "main.cjs",
+  "scripts": {
+    "start": "node launch.cjs",
+    "dev": "node launch.cjs",
+    "test": "node --test"
+  },
+  "devDependencies": {
+    "electron": "^31.7.7"
+  }
+}

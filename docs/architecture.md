@@ -18,9 +18,17 @@ The system has four main parts:
 4. React frontend
    - recommendation workflow
    - wishlist workflow
-   - match review workflow
+   - Add watched workflow
+   - not-interested workflow
+5. Electron desktop shell
+   - starts and stops the local FastAPI backend
+   - loads the built React frontend in a native window
+   - injects required poster request headers
+   - keeps desktop-only process lifecycle behavior outside the web frontend
 
 Live recommendation must not call Douban. It only reads PostgreSQL.
+
+The Add watched workflow is the intentional exception to the general offline-enrichment rule. It writes Google Sheets synchronously and fetches missing canonical watched-movie metadata synchronously so success means the source-of-truth row and local canonical link both exist.
 
 ## Data Flow
 
@@ -45,6 +53,17 @@ Douban list/search/similar-source import
 -> Douban subject enrichment
 -> movies
 -> candidate_pool entries
+```
+
+The desktop interactive path is:
+
+```text
+start-app.cmd
+-> Electron window + FastAPI backend in parallel
+-> frontend waits for backend through preload IPC only when making API calls
+-> background Selenium prewarm for missing watched-movie metadata
+-> close window
+-> stop backend process tree and shared Selenium driver
 ```
 
 ## Module Layout
@@ -75,6 +94,10 @@ movies/
 |   `-- candidate_pool.py
 |-- frontend/
 |   `-- src/
+|-- desktop/
+|   |-- main.cjs
+|   |-- preload.cjs
+|   `-- launch.cjs
 `-- data/
     |-- imports/
     `-- cache/
@@ -405,7 +428,6 @@ Feature groups:
 - directors
 - actors
 - decade/year
-- public rating bucket
 
 Score candidates by similarity to the positive profile minus similarity to the negative profile.
 
@@ -418,7 +440,7 @@ How much does this candidate look like movies the user rated highly,
 minus how much it looks like movies the user rated poorly?
 ```
 
-It builds two feature profiles from `viewing_history`:
+It builds two feature profiles from `viewing_history` once per recommendation run:
 
 - `positive_profile`: features from watched movies with rating >= 4.0
 - `negative_profile`: features from watched movies with rating < 4.0
@@ -474,7 +496,7 @@ hybrid_score =
 The returned batch should contain:
 
 - four exploit items with high hybrid_score
-- two explore items selected to increase diversity across genre, country, era, director, or popularity level
+- four explore items selected to increase diversity across genre, country, era, director, or popularity level
 
 Current simple baseline implementation:
 
@@ -557,31 +579,26 @@ watched rating < 4.0: -1.0
 
 These are product defaults, not fixed model truth. They should be tuned after real use.
 
-## FastAPI Endpoint Draft
+## Current FastAPI Endpoints
 
 ```text
-POST /imports/viewing-history
-GET  /imports/{import_id}/status
-
-POST /douban/match/run
-GET  /douban/matches?status=needs_review
-POST /douban/matches/{candidate_id}/confirm
-POST /douban/matches/{candidate_id}/reject
-
-POST /douban/enrich/run
-POST /candidate-pool/build
-
+GET  /movies/search?q={query}
+POST /viewing-history
 GET  /recommendations?strategy=hybrid
+GET  /recommendations/{session_id}
 POST /recommendations/{session_id}/items/{item_id}/feedback
 
 GET  /wishlist
 POST /wishlist/{wishlist_id}/watched
 DELETE /wishlist/{wishlist_id}
 
-GET  /movies/{movie_id}
+GET  /not-interested
+DELETE /not-interested/{movie_id}
 ```
 
-## Frontend Pages
+Import, rebuild, enrichment, candidate-pool, and evaluation operations are CLI jobs under `jobs/`; they are not exposed as HTTP admin endpoints.
+
+## Frontend Views
 
 ### Recommendations
 
@@ -600,7 +617,6 @@ Primary screen.
   - director
   - main cast
   - Douban rating
-  - awards if present
   - Douban URL
 
 ### Wishlist
@@ -610,23 +626,19 @@ Primary screen.
 - mark watched
 - remove from wishlist
 
-### Record Watched
+### Add Watched
 
-Can be a modal from wishlist.
-
+- title, subject ID, or Douban URL search
 - watched date
 - rating
 - quality
 - comment
+- source-tab return after success
 
-### Match Review
+### Not Interested
 
-Admin-style page.
-
-- raw Excel row
-- candidate matches
-- match score and fields
-- confirm / reject / no match
+- current not-interested movies
+- clear current negative-interest state
 
 ## Import And Enrichment Reliability
 

@@ -22,7 +22,15 @@ from backend.app.models.domain import (
     WishlistItem,
     WishlistStatus,
 )
-from backend.app.recommenders.simple import content_score, diversity_gain, hybrid_score, popularity_score
+from backend.app.recommenders.simple import (
+    ContentProfile,
+    build_content_profile,
+    content_score,
+    content_score_from_profile,
+    diversity_gain,
+    hybrid_score,
+    popularity_score,
+)
 from backend.app.services.catalog import seed_history, seed_movies
 from backend.app.services.display_text import display_person_names
 
@@ -916,8 +924,16 @@ class RecommendationService:
 
         requested_cooldown = max(0, exposure_cooldown_sessions)
         applied_cooldown, candidates = self._apply_exposure_cooldown(candidates, requested_cooldown)
+        content_profile = (
+            build_content_profile(self.repository.history, self.repository.movies_by_id)
+            if strategy in {"content", "hybrid"}
+            else None
+        )
 
-        scored = [(candidate, self._score_with_feedback_penalty(candidate.movie, strategy)) for candidate in candidates]
+        scored = [
+            (candidate, self._score_with_feedback_penalty(candidate.movie, strategy, content_profile))
+            for candidate in candidates
+        ]
         scored.sort(key=lambda item: item[1]["total"], reverse=True)
 
         exploit_candidates = [candidate for candidate, _ in scored[:EXPLOIT_SLOT_COUNT]]
@@ -942,7 +958,7 @@ class RecommendationService:
                 source_label=self._source_label(candidate),
             )
             for index, candidate in enumerate(selected)
-            for scores in [self._score_with_feedback_penalty(candidate.movie, strategy)]
+            for scores in [self._score_with_feedback_penalty(candidate.movie, strategy, content_profile)]
         ]
         return self.repository.save_session(
             RecommendationSession(
@@ -1124,19 +1140,38 @@ class RecommendationService:
             applied_cooldown -= 1
         return 0, candidates
 
-    def _score(self, movie: Movie, strategy: Strategy) -> dict[str, float]:
+    def _score(
+        self,
+        movie: Movie,
+        strategy: Strategy,
+        content_profile: ContentProfile | None = None,
+    ) -> dict[str, float]:
         if strategy == "popularity":
             total = popularity_score(movie)
             return {"public_quality": total, "total": total}
         if strategy == "content":
-            total = content_score(movie, self.repository.history, self.repository.movies_by_id)
+            total = (
+                content_score_from_profile(movie, content_profile)
+                if content_profile is not None
+                else content_score(movie, self.repository.history, self.repository.movies_by_id)
+            )
             return {"personal_preference": total, "total": total}
         if strategy == "hybrid":
-            return hybrid_score(movie, self.repository.history, self.repository.movies_by_id)
+            return hybrid_score(
+                movie,
+                self.repository.history,
+                self.repository.movies_by_id,
+                content_profile=content_profile,
+            )
         raise ValueError(f"Unknown recommendation strategy: {strategy}")
 
-    def _score_with_feedback_penalty(self, movie: Movie, strategy: Strategy) -> dict[str, float]:
-        scores = dict(self._score(movie, strategy))
+    def _score_with_feedback_penalty(
+        self,
+        movie: Movie,
+        strategy: Strategy,
+        content_profile: ContentProfile | None = None,
+    ) -> dict[str, float]:
+        scores = dict(self._score(movie, strategy, content_profile))
         penalty = self._maybe_later_penalty(movie.id)
         if penalty:
             scores["maybe_later_penalty"] = -penalty

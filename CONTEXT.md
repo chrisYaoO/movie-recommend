@@ -16,7 +16,7 @@ The first usable version should close the practical recommendation loop:
 import viewing history
 -> match and enrich movies
 -> build local candidate pool
--> click to recommend six movies
+-> click to recommend eight movies
 -> collect feedback
 -> maintain wishlist
 -> record watched wishlist movies back into viewing history
@@ -30,10 +30,10 @@ The first version should be useful before true RL exists.
 
 A recommendation session is an on-demand interaction started by the user clicking a recommendation action. It is not a scheduled or daily feed.
 
-Each session returns exactly six movie candidates:
+Each session returns exactly eight movie candidates:
 
 - four high-confidence candidates
-- two exploratory or diversity candidates
+- four exploratory or diversity candidates
 
 The mix should balance immediate preference fit with discovery so the system does not narrow too quickly.
 
@@ -232,8 +232,8 @@ Accepted stack:
 - Douban matching and metadata enrichment
 - PostgreSQL persistence
 - local candidate pool
-- on-demand API endpoint returning six recommendations
-- thin React frontend with six movie cards
+- on-demand API endpoint returning eight recommendations
+- React frontend with eight movie cards
 - want-to-watch, maybe-later, and not-interested feedback
 - wishlist
 - direct record-watched entry from wishlist

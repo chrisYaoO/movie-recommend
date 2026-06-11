@@ -1,5 +1,7 @@
 # Database Rebuild Checklist
 
+This is a historical execution and verification record for the database rebuild. Test counts and measurements inside completed sections describe the run at that time; use `README.md` for current commands and current expected test totals.
+
 Status legend: `[ ]` not started, `[~]` in progress, `[x]` completed, `[?]` blocked or awaiting user confirmation.
 
 ## Ground Rules
