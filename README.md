@@ -363,6 +363,8 @@ Use this as the daily check after each candidate-pool batch. The first hard gate
 - [CONTEXT.md](CONTEXT.md): product boundaries and domain decisions
 - [docs/requirements.md](docs/requirements.md): current functional requirements
 - [docs/architecture.md](docs/architecture.md): data flow, persistence, APIs, and recommendation mechanics
+- [docs/contextual-bandit-design.md](docs/contextual-bandit-design.md): planned `bandit_hybrid` strategy, Linear Thompson Sampling design, and reward rules
+- [docs/checklists/contextual-bandit-implementation-checklist.md](docs/checklists/contextual-bandit-implementation-checklist.md): backend implementation checklist for `bandit_hybrid`
 - [docs/desktop.md](docs/desktop.md): Electron runtime and lifecycle
 - [docs/technical-debt.md](docs/technical-debt.md): prioritized correctness, security, and maintainability risks
 - [docs/checklists/frontend-performance-checklist.md](docs/checklists/frontend-performance-checklist.md): completed frontend slices and remaining performance work

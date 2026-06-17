@@ -200,6 +200,8 @@ Initial strategies:
 
 The normal frontend should default to the hybrid strategy. The backend should allow strategy switching for evaluation and debugging.
 
+When the system adds a contextual bandit strategy, the preferred first algorithm is Linear Thompson Sampling. It should learn from accumulated recommendation feedback while keeping the hybrid ranker as the default baseline and fallback.
+
 ### Hybrid Ranking Signals
 
 The hybrid ranker should combine:

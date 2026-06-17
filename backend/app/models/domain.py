@@ -182,7 +182,7 @@ class RecommendationItem:
     rank: int
     slot_type: SlotType
     score: float
-    score_components: dict[str, float]
+    score_components: dict[str, Any]
     source_ref: str | None = None
     source_label: str | None = None
     processing_status: RecommendationProcessingStatus | None = None

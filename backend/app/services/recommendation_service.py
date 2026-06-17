@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from contextlib import nullcontext
 from dataclasses import asdict, dataclass
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 import json
 import os
 import random
@@ -31,15 +31,27 @@ from backend.app.recommenders.simple import (
     hybrid_score,
     popularity_score,
 )
+from backend.app.recommenders.bandit import (
+    BANDIT_MIN_EXAMPLES,
+    FEATURE_VERSION,
+    REWARD_VERSION,
+    build_bandit_feature_context,
+    build_bandit_feature_vector,
+    build_bandit_training_examples,
+    fit_diagonal_linear_thompson_model,
+    should_use_bandit_explore,
+    write_latest_model_cache,
+)
 from backend.app.services.catalog import seed_history, seed_movies
 from backend.app.services.display_text import display_person_names
 
 load_local_env()
 
-Strategy = Literal["popularity", "content", "hybrid"]
+Strategy = Literal["popularity", "content", "hybrid", "bandit_hybrid"]
 EXPLOIT_SLOT_COUNT = 4
 EXPLORE_SLOT_COUNT = 4
 RECOMMENDATION_SESSION_SIZE = EXPLOIT_SLOT_COUNT + EXPLORE_SLOT_COUNT
+MAYBE_LATER_DOWNRANKING_WINDOW = timedelta(days=30)
 
 
 def _current_release_year_limit() -> int:
@@ -84,6 +96,7 @@ class MovieRepository(Protocol):
     movies_by_id: dict[str, Movie]
     history: list[ViewingHistory]
     feedback: list[Feedback]
+    wishlist: dict[str, WishlistItem]
 
     def active_candidates(self) -> list[RecommendationCandidate]: ...
 
@@ -125,6 +138,8 @@ class MovieRepository(Protocol):
     ) -> RecommendationItem | None: ...
 
     def recent_recommendation_movie_ids(self, session_count: int) -> set[str]: ...
+
+    def recommendation_training_sessions(self) -> list[RecommendationSession]: ...
 
 
 class InMemoryMovieRepository:
@@ -170,6 +185,9 @@ class InMemoryMovieRepository:
             reverse=True,
         )[:session_count]
         return {item.movie.id for session in recent_sessions for item in session.items}
+
+    def recommendation_training_sessions(self) -> list[RecommendationSession]:
+        return sorted(self.sessions.values(), key=lambda session: session.created_at)
 
     def add_feedback(self, feedback: Feedback) -> Feedback:
         self.feedback.append(feedback)
@@ -406,7 +424,7 @@ class PostgresRecommendationRepository:
                     strategy = excluded.strategy,
                     context_snapshot = excluded.context_snapshot
                 """,
-                (session.id, session.strategy, self._jsonb({}), session.created_at),
+                (session.id, session.strategy, self._jsonb(session.debug_metadata), session.created_at),
             )
             for item in session.items:
                 self.connection.execute(
@@ -447,7 +465,7 @@ class PostgresRecommendationRepository:
     def get_session(self, session_id: str) -> RecommendationSession | None:
         row = self.connection.execute(
             """
-            SELECT id, strategy, created_at
+            SELECT id, strategy, context_snapshot, created_at
             FROM recommendation_sessions
             WHERE id = %s
             """,
@@ -494,9 +512,65 @@ class PostgresRecommendationRepository:
             items=items,
             id=str(row["id"]),
             created_at=row["created_at"],
+            debug_metadata=self._dict_from_json_value(row["context_snapshot"]),
         )
         self.sessions[session.id] = session
         return session
+
+    def recommendation_training_sessions(self) -> list[RecommendationSession]:
+        self.refresh()
+        session_rows = self.connection.execute(
+            """
+            SELECT id, strategy, context_snapshot, created_at
+            FROM recommendation_sessions
+            ORDER BY created_at
+            """
+        ).fetchall()
+        if not session_rows:
+            return []
+        item_rows = self.connection.execute(
+            """
+            SELECT
+                id, session_id, movie_id, rank, slot_type, score, score_components,
+                source_ref, source_label, processing_status, processed_at
+            FROM recommendation_items
+            ORDER BY session_id, rank
+            """
+        ).fetchall()
+        items_by_session: dict[str, list[RecommendationItem]] = {}
+        for item_row in item_rows:
+            movie = self.movies_by_id.get(str(item_row["movie_id"]))
+            if movie is None:
+                continue
+            session_id = str(item_row["session_id"])
+            items_by_session.setdefault(session_id, []).append(
+                RecommendationItem(
+                    movie=movie,
+                    rank=int(item_row["rank"]),
+                    slot_type=SlotType(str(item_row["slot_type"])),
+                    score=float(item_row["score"]),
+                    score_components=self._dict_from_json_value(item_row["score_components"]),
+                    source_ref=str(item_row["source_ref"]) if item_row["source_ref"] is not None else None,
+                    source_label=str(item_row["source_label"]) if item_row["source_label"] is not None else None,
+                    processing_status=RecommendationProcessingStatus(str(item_row["processing_status"]))
+                    if item_row["processing_status"] is not None
+                    else None,
+                    processed_at=item_row["processed_at"],
+                    id=str(item_row["id"]),
+                )
+            )
+        sessions = [
+            RecommendationSession(
+                strategy=str(row["strategy"]),
+                items=items_by_session.get(str(row["id"]), []),
+                id=str(row["id"]),
+                created_at=row["created_at"],
+                debug_metadata=self._dict_from_json_value(row["context_snapshot"]),
+            )
+            for row in session_rows
+        ]
+        self.sessions.update({session.id: session for session in sessions})
+        return sessions
 
     def recent_recommendation_movie_ids(self, session_count: int) -> set[str]:
         if session_count <= 0:
@@ -759,12 +833,12 @@ class PostgresRecommendationRepository:
             value = json.loads(value)
         return tuple(str(item) for item in value)
 
-    def _dict_from_json_value(self, value: Any) -> dict[str, float]:
+    def _dict_from_json_value(self, value: Any) -> dict[str, Any]:
         if value is None:
             return {}
         if isinstance(value, str):
             value = json.loads(value)
-        return {str(key): float(score) for key, score in dict(value).items()}
+        return dict(value)
 
     def _load_interaction_state(self) -> None:
         self._load_feedback()
@@ -924,14 +998,15 @@ class RecommendationService:
 
         requested_cooldown = max(0, exposure_cooldown_sessions)
         applied_cooldown, candidates = self._apply_exposure_cooldown(candidates, requested_cooldown)
+        scoring_strategy: Literal["popularity", "content", "hybrid"] = "hybrid" if strategy == "bandit_hybrid" else strategy
         content_profile = (
             build_content_profile(self.repository.history, self.repository.movies_by_id)
-            if strategy in {"content", "hybrid"}
+            if scoring_strategy in {"content", "hybrid"}
             else None
         )
 
         scored = [
-            (candidate, self._score_with_feedback_penalty(candidate.movie, strategy, content_profile))
+            (candidate, self._score_with_feedback_penalty(candidate.movie, scoring_strategy, content_profile))
             for candidate in candidates
         ]
         scored.sort(key=lambda item: item[1]["total"], reverse=True)
@@ -939,12 +1014,23 @@ class RecommendationService:
         exploit_candidates = [candidate for candidate, _ in scored[:EXPLOIT_SLOT_COUNT]]
         selected = list(exploit_candidates)
         remaining = [(candidate, scores) for candidate, scores in scored if candidate not in selected]
-        explore_candidates = self._select_explore(
-            remaining,
-            selected,
-            limit=EXPLORE_SLOT_COUNT,
-            explore_seed=explore_seed,
-        )
+        selected_scores_by_movie_id = {candidate.movie.id: scores for candidate, scores in scored}
+        bandit_metadata: dict[str, Any] = {}
+        if strategy == "bandit_hybrid":
+            explore_candidates, bandit_scores_by_movie_id, bandit_metadata = self._select_bandit_explore(
+                remaining,
+                selected,
+                limit=EXPLORE_SLOT_COUNT,
+                explore_seed=explore_seed,
+            )
+            selected_scores_by_movie_id.update(bandit_scores_by_movie_id)
+        else:
+            explore_candidates = self._select_explore(
+                remaining,
+                selected,
+                limit=EXPLORE_SLOT_COUNT,
+                explore_seed=explore_seed,
+            )
         selected.extend(explore_candidates)
 
         items = [
@@ -952,13 +1038,12 @@ class RecommendationService:
                 movie=candidate.movie,
                 rank=index + 1,
                 slot_type=SlotType.EXPLOIT if index < EXPLOIT_SLOT_COUNT else SlotType.EXPLORE,
-                score=scores["total"],
-                score_components=scores,
+                score=selected_scores_by_movie_id[candidate.movie.id]["total"],
+                score_components=selected_scores_by_movie_id[candidate.movie.id],
                 source_ref=candidate.source_ref,
                 source_label=self._source_label(candidate),
             )
             for index, candidate in enumerate(selected)
-            for scores in [self._score_with_feedback_penalty(candidate.movie, strategy, content_profile)]
         ]
         return self.repository.save_session(
             RecommendationSession(
@@ -970,6 +1055,7 @@ class RecommendationService:
                     "cooldown_relaxed": applied_cooldown < requested_cooldown,
                     "seed": explore_seed,
                     "eligible_candidate_count": len(candidates),
+                    **bandit_metadata,
                 },
             )
         )
@@ -1179,11 +1265,13 @@ class RecommendationService:
         return scores
 
     def _maybe_later_penalty(self, movie_id: str) -> float:
+        now = datetime.now(timezone.utc)
         count = sum(
             1
             for feedback in self.repository.feedback
             if feedback.movie_id == movie_id
-            and feedback.feedback_type in {FeedbackType.MAYBE_LATER, FeedbackType.REMOVED_FROM_WISHLIST}
+            and feedback.feedback_type == FeedbackType.MAYBE_LATER
+            and now - _as_aware(feedback.created_at) <= MAYBE_LATER_DOWNRANKING_WINDOW
         )
         return min(6.0, count * 1.5)
 
@@ -1218,6 +1306,92 @@ class RecommendationService:
             scored = [(item, scores) for item, scores in scored if item.movie.id != candidate.movie.id]
             explore.append(candidate)
         return explore
+
+    def _select_bandit_explore(
+        self,
+        scored: list[tuple[RecommendationCandidate, dict[str, Any]]],
+        selected: list[RecommendationCandidate],
+        limit: int,
+        explore_seed: int | None = None,
+    ) -> tuple[list[RecommendationCandidate], dict[str, dict[str, Any]], dict[str, Any]]:
+        metadata: dict[str, Any] = {
+            "feature_version": FEATURE_VERSION,
+            "reward_version": REWARD_VERSION,
+            "bandit_min_examples": BANDIT_MIN_EXAMPLES,
+            "bandit_used": False,
+        }
+        try:
+            examples = build_bandit_training_examples(
+                sessions=self.repository.recommendation_training_sessions(),
+                feedback=self.repository.feedback,
+                history=self.repository.history,
+                movies_by_id=self.repository.movies_by_id,
+                wishlist=self.repository.wishlist.values(),
+            )
+            model = fit_diagonal_linear_thompson_model(examples)
+            try:
+                write_latest_model_cache(model)
+            except OSError:
+                pass
+            metadata["trainable_example_count"] = model.trained_example_count
+            if not should_use_bandit_explore(model):
+                metadata["bandit_fallback_reason"] = "insufficient_training_examples"
+                return (
+                    self._select_explore(scored, selected, limit=limit, explore_seed=explore_seed),
+                    {},
+                    metadata,
+                )
+
+            context = build_bandit_feature_context(
+                history=self.repository.history,
+                movies_by_id=self.repository.movies_by_id,
+                wishlist=self.repository.wishlist.values(),
+                feedback=self.repository.feedback,
+            )
+            rng = random.Random(explore_seed) if explore_seed is not None else random.Random()
+            bandit_scored = []
+            for candidate, scores in scored:
+                features = build_bandit_feature_vector(
+                    candidate.movie,
+                    scores,
+                    context,
+                    source_ref=candidate.source_ref,
+                )
+                bandit_score = model.sampled_score(features, rng)
+                score_components = {
+                    **scores,
+                    "bandit_sample": bandit_score.sample,
+                    "bandit_mean": bandit_score.mean,
+                    "bandit_uncertainty": bandit_score.uncertainty,
+                    "feature_version": FEATURE_VERSION,
+                }
+                bandit_scored.append((candidate, score_components, bandit_score.sample))
+
+            explore: list[RecommendationCandidate] = []
+            score_components_by_movie_id: dict[str, dict[str, Any]] = {}
+            remaining = list(bandit_scored)
+            for _ in range(limit):
+                if not remaining:
+                    break
+                selected_movies = [candidate.movie for candidate in selected + explore]
+                candidate, score_components, _ = max(
+                    remaining,
+                    key=lambda item: item[2] + diversity_gain(item[0].movie, selected_movies) * 0.10,
+                )
+                explore.append(candidate)
+                score_components_by_movie_id[candidate.movie.id] = score_components
+                remaining = [item for item in remaining if item[0].movie.id != candidate.movie.id]
+
+            metadata["bandit_used"] = True
+            return explore, score_components_by_movie_id, metadata
+        except Exception:
+            metadata.setdefault("trainable_example_count", 0)
+            metadata["bandit_fallback_reason"] = "training_failed"
+            return (
+                self._select_explore(scored, selected, limit=limit, explore_seed=explore_seed),
+                {},
+                metadata,
+            )
 
     def _feedback_value(self, feedback_type: FeedbackType) -> float:
         return {
@@ -1399,3 +1573,9 @@ def _positive_weights(values: list[float]) -> list[float]:
     if any(value > 0 for value in shifted):
         return shifted
     return [1.0 for _ in values]
+
+
+def _as_aware(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value

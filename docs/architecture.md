@@ -563,21 +563,38 @@ diversity_gain =
 
 This diversity score is batch-local. It prevents a single recommendation session from returning eight very similar movies; it does not measure novelty against the user's full viewing history.
 
+### Planned Contextual Bandit Strategy
+
+The planned first learning strategy is `bandit_hybrid`. It keeps the first four
+exploit slots on the existing hybrid ranker and uses Linear Thompson Sampling
+for the four explore slots.
+
+The API and frontend defaults remain `hybrid`. `bandit_hybrid` should be
+invoked explicitly by strategy parameter for backend review and evaluation
+before any frontend default changes. Backend implementation should preserve the
+current hard exclusions, exposure cooldown, maybe-later downranking, and
+batch-level diversity constraints.
+
+See `docs/contextual-bandit-design.md` for the detailed algorithm, feature
+versioning, reward mapping, persistence rules, and fallback behavior. See
+`docs/checklists/contextual-bandit-implementation-checklist.md` for the
+implementation checklist.
+
 ### Feedback Weights
 
 Initial weights:
 
 ```text
-want_to_watch: +0.7
-maybe_later: +0.2
-not_interested: -0.8
-opened_douban: +0.1
-watched rating >= 4.5: +1.0
-watched rating 4.0-4.49: +0.6
-watched rating < 4.0: -1.0
+want_to_watch: +0.10
+maybe_later: +0.05
+not_interested: -1.00
+opened_douban: logged, not trained in bandit v1
+watched rating < 4.0: -1.00
+watched rating 4.0 to 5.0: rating - 4.0
 ```
 
 These are product defaults, not fixed model truth. They should be tuned after real use.
+See `docs/contextual-bandit-design.md` for bandit-specific reward resolution and training exclusions.
 
 ## Current FastAPI Endpoints
 

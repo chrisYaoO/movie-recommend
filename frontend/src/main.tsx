@@ -3,6 +3,7 @@ import { createRoot } from "react-dom/client";
 import "./styles.css";
 
 type Tab = "recommend" | "record" | "wishlist" | "notInterested";
+type RecommendationStrategy = "hybrid" | "bandit_hybrid";
 
 type SearchCandidate = {
   subject_id: string;
@@ -102,6 +103,7 @@ const WISHLIST_CACHE_KEY = "movies.frontend.wishlist.firstPage";
 const NOT_INTERESTED_CACHE_KEY = "movies.frontend.notInterested.firstPage";
 const RECORD_DRAFT_KEY = "movies.frontend.recordWatchedDraft";
 const DEBUG_MODE_KEY = "movies.frontend.debugMode";
+const RECOMMENDATION_STRATEGY_KEY = "movies.frontend.recommendationStrategy";
 const BASELINE_HYBRID_TOTAL = 23.4568;
 
 function defaultRecordForm(): RecordForm {
@@ -216,6 +218,7 @@ function RecommendationView({
   processedItem: ProcessedRecommendationItem | null;
 }) {
   const [session, setSession] = useStoredState<RecommendationSession | null>(RECOMMENDATION_SESSION_KEY, null);
+  const [strategy, setStrategy] = useStoredState<RecommendationStrategy>(RECOMMENDATION_STRATEGY_KEY, "hybrid");
   const [status, setStatus] = useState("");
   const [loading, setLoading] = useState(false);
 
@@ -231,7 +234,7 @@ function RecommendationView({
         }
         return;
       }
-      await loadRecommendations(debugMode);
+      await loadRecommendations(debugMode, strategy);
     }
     void restore();
     return () => {
@@ -260,11 +263,11 @@ function RecommendationView({
     });
   }, [processedItem, setSession]);
 
-  async function loadRecommendations(nextDebugMode = debugMode) {
+  async function loadRecommendations(nextDebugMode = debugMode, nextStrategy = strategy) {
     setLoading(true);
     setStatus("");
     try {
-      const query = recommendationQuery(nextDebugMode);
+      const query = recommendationQuery(nextDebugMode, nextStrategy);
       const data = await api<RecommendationSession>(`/recommendations${query}`);
       setSession(data);
     } catch (error) {
@@ -275,7 +278,12 @@ function RecommendationView({
   }
 
   async function refreshRecommendations() {
-    await loadRecommendations(debugMode);
+    await loadRecommendations(debugMode, strategy);
+  }
+
+  async function changeStrategy(nextStrategy: RecommendationStrategy) {
+    setStrategy(nextStrategy);
+    await loadRecommendations(debugMode, nextStrategy);
   }
 
   function startWatched(item: RecommendationItem) {
@@ -320,6 +328,17 @@ function RecommendationView({
   return (
     <section className="panel">
       <div className="toolbar align-right">
+        <label className="strategy-control">
+          Strategy
+          <select
+            value={strategy}
+            onChange={(event) => void changeStrategy(event.target.value as RecommendationStrategy)}
+            disabled={loading}
+          >
+            <option value="hybrid">Hybrid</option>
+            <option value="bandit_hybrid">Bandit hybrid</option>
+          </select>
+        </label>
         <button className="primary" onClick={refreshRecommendations} disabled={loading}>
           Refresh
         </button>
@@ -843,8 +862,8 @@ function normalizedScore(score: number) {
   return Math.round((score / BASELINE_HYBRID_TOTAL) * 100);
 }
 
-function recommendationQuery(debugMode: boolean) {
-  const params = new URLSearchParams({ strategy: "hybrid" });
+function recommendationQuery(debugMode: boolean, strategy: RecommendationStrategy) {
+  const params = new URLSearchParams({ strategy });
   if (debugMode) {
     params.set("exposure_cooldown_sessions", "1");
     params.set("seed", "42");

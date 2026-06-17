@@ -7,7 +7,7 @@ import json
 import sys
 from typing import Iterable
 
-from backend.app.models.domain import RecommendationSession
+from backend.app.models.domain import Feedback, FeedbackType, RecommendationSession, ViewingHistory
 from backend.app.services.recommendation_service import PostgresRecommendationRepository, RecommendationService
 from jobs.import_auto_matched_history import resolve_postgres_dsn
 
@@ -37,6 +37,14 @@ class RecommendationEvaluationSummary:
     slot_mix: dict[str, int]
     source_mix: dict[str, int]
     repeated_movies: dict[str, int]
+    explore_slot_reward_rate: float | None = None
+    explore_slot_reward_count: int = 0
+    explore_slot_positive_reward_count: int = 0
+    negative_feedback_recurrence_count: int = 0
+    bandit_trainable_example_count: int | None = None
+    bandit_used_count: int = 0
+    bandit_fallback_count: int = 0
+    bandit_fallback_reasons: dict[str, int] | None = None
 
 
 @dataclass(frozen=True)
@@ -70,6 +78,8 @@ def evaluate_recommendations(
 ) -> RecommendationEvaluationResult:
     watched_movie_ids = _watched_movie_ids(repository)
     pool_sources_by_movie_id = _pool_sources_by_movie_id(repository)
+    historical_rewards_by_movie_id = _historical_rewards_by_movie_id(repository.history, repository.feedback)
+    current_negative_movie_ids = _current_negative_movie_ids(repository.feedback)
 
     items: list[RecommendationEvaluationItem] = []
     sessions = [service.recommend(strategy, explore_seed=_run_seed(seed, run_index)) for run_index in range(runs)]
@@ -86,7 +96,13 @@ def evaluate_recommendations(
     return RecommendationEvaluationResult(
         strategy=strategy,
         items=tuple(items),
-        summary=_summarize(items, runs),
+        summary=_summarize(
+            items,
+            runs,
+            sessions=sessions,
+            historical_rewards_by_movie_id=historical_rewards_by_movie_id,
+            current_negative_movie_ids=current_negative_movie_ids,
+        ),
         pool_health=collect_candidate_pool_health(repository),
     )
 
@@ -141,7 +157,12 @@ def render_text(result: RecommendationEvaluationResult) -> str:
             f"unique_movies={summary.unique_movies}",
             f"duplicate_in_session_count={summary.duplicate_in_session_count}",
             f"watched_leak_count={summary.watched_leak_count}",
+            f"negative_feedback_recurrence_count={summary.negative_feedback_recurrence_count}",
             f"average_douban_rating={summary.average_douban_rating:.3f}",
+            f"explore_slot_reward_count={summary.explore_slot_reward_count}",
+            f"explore_slot_positive_reward_count={summary.explore_slot_positive_reward_count}",
+            "explore_slot_reward_rate="
+            + ("n/a" if summary.explore_slot_reward_rate is None else f"{summary.explore_slot_reward_rate:.3f}"),
             "slot_mix:",
             *_format_counter(summary.slot_mix),
             "source_mix:",
@@ -150,6 +171,17 @@ def render_text(result: RecommendationEvaluationResult) -> str:
             *_format_counter(summary.repeated_movies),
         ]
     )
+    if summary.bandit_trainable_example_count is not None:
+        lines.extend(
+            [
+                "bandit:",
+                f"  trainable_example_count={summary.bandit_trainable_example_count}",
+                f"  used_count={summary.bandit_used_count}",
+                f"  fallback_count={summary.bandit_fallback_count}",
+                "  fallback_reasons:",
+                *_format_counter(summary.bandit_fallback_reasons or {}),
+            ]
+        )
     return "\n".join(lines)
 
 
@@ -268,8 +300,14 @@ def _evaluation_items_for_session(
 def _summarize(
     items: Iterable[RecommendationEvaluationItem],
     runs: int,
+    sessions: Iterable[RecommendationSession] = (),
+    historical_rewards_by_movie_id: dict[str, float] | None = None,
+    current_negative_movie_ids: set[str] | None = None,
 ) -> RecommendationEvaluationSummary:
     item_list = list(items)
+    session_list = list(sessions)
+    rewards_by_movie_id = historical_rewards_by_movie_id or {}
+    negative_movie_ids = current_negative_movie_ids or set()
     movie_counts = Counter(item.movie_id for item in item_list)
     title_by_movie_id = {item.movie_id: item.title for item in item_list}
     duplicate_in_session_count = 0
@@ -294,6 +332,23 @@ def _summarize(
         if item_list
         else 0.0
     )
+    explore_rewards = [
+        rewards_by_movie_id[item.movie_id]
+        for item in item_list
+        if item.slot_type == "explore" and item.movie_id in rewards_by_movie_id
+    ]
+    explore_positive_rewards = [reward for reward in explore_rewards if reward > 0]
+    bandit_sessions = [session for session in session_list if "bandit_used" in session.debug_metadata]
+    fallback_reasons = Counter(
+        str(session.debug_metadata.get("bandit_fallback_reason"))
+        for session in bandit_sessions
+        if session.debug_metadata.get("bandit_fallback_reason")
+    )
+    trainable_counts = [
+        int(session.debug_metadata["trainable_example_count"])
+        for session in bandit_sessions
+        if "trainable_example_count" in session.debug_metadata
+    ]
     return RecommendationEvaluationSummary(
         runs=runs,
         total_items=len(item_list),
@@ -304,6 +359,14 @@ def _summarize(
         slot_mix=dict(Counter(item.slot_type for item in item_list)),
         source_mix=dict(source_mix),
         repeated_movies=dict(sorted(repeated_movies.items(), key=lambda item: (-item[1], item[0]))),
+        explore_slot_reward_rate=(len(explore_positive_rewards) / len(explore_rewards)) if explore_rewards else None,
+        explore_slot_reward_count=len(explore_rewards),
+        explore_slot_positive_reward_count=len(explore_positive_rewards),
+        negative_feedback_recurrence_count=sum(1 for item in item_list if item.movie_id in negative_movie_ids),
+        bandit_trainable_example_count=trainable_counts[-1] if trainable_counts else None,
+        bandit_used_count=sum(1 for session in bandit_sessions if session.debug_metadata.get("bandit_used")),
+        bandit_fallback_count=sum(1 for session in bandit_sessions if not session.debug_metadata.get("bandit_used")),
+        bandit_fallback_reasons=dict(fallback_reasons) if bandit_sessions else None,
     )
 
 
@@ -339,12 +402,62 @@ def _run_seed(seed: int | None, run_index: int) -> int | None:
     return seed + run_index
 
 
+def _historical_rewards_by_movie_id(
+    history: Iterable[ViewingHistory],
+    feedback: Iterable[Feedback],
+) -> dict[str, float]:
+    rewards: dict[str, float] = {}
+    for item in history:
+        if item.user_rating is None:
+            continue
+        rewards[item.movie_id] = -1.0 if item.user_rating < 4.0 else min(1.0, max(0.0, item.user_rating - 4.0))
+
+    latest_feedback_by_movie: dict[str, Feedback] = {}
+    for event in feedback:
+        if event.feedback_type in {
+            FeedbackType.WANT_TO_WATCH,
+            FeedbackType.MAYBE_LATER,
+            FeedbackType.NOT_INTERESTED,
+            FeedbackType.REMOVED_FROM_WISHLIST,
+            FeedbackType.CLEAR_NOT_INTERESTED,
+        }:
+            latest_feedback_by_movie[event.movie_id] = event
+    for movie_id, event in latest_feedback_by_movie.items():
+        if movie_id in rewards:
+            continue
+        if event.feedback_type == FeedbackType.WANT_TO_WATCH:
+            rewards[movie_id] = 0.10
+        elif event.feedback_type == FeedbackType.MAYBE_LATER:
+            rewards[movie_id] = 0.05
+        elif event.feedback_type == FeedbackType.NOT_INTERESTED:
+            rewards[movie_id] = -1.0
+    return rewards
+
+
+def _current_negative_movie_ids(feedback: Iterable[Feedback]) -> set[str]:
+    latest_feedback_by_movie: dict[str, Feedback] = {}
+    for event in feedback:
+        if event.feedback_type in {
+            FeedbackType.WANT_TO_WATCH,
+            FeedbackType.MAYBE_LATER,
+            FeedbackType.NOT_INTERESTED,
+            FeedbackType.REMOVED_FROM_WISHLIST,
+            FeedbackType.CLEAR_NOT_INTERESTED,
+        }:
+            latest_feedback_by_movie[event.movie_id] = event
+    return {
+        movie_id
+        for movie_id, event in latest_feedback_by_movie.items()
+        if event.feedback_type == FeedbackType.NOT_INTERESTED
+    }
+
+
 def main() -> None:
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8")
 
     parser = argparse.ArgumentParser(description="Evaluate recommendation output quality.")
-    parser.add_argument("--strategy", default="hybrid", choices=("hybrid", "popularity", "content"))
+    parser.add_argument("--strategy", default="hybrid", choices=("hybrid", "popularity", "content", "bandit_hybrid"))
     parser.add_argument("--runs", type=int, default=10)
     parser.add_argument("--dsn", default=None)
     parser.add_argument("--config-path", default=".env")

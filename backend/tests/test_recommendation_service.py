@@ -1,10 +1,20 @@
 ﻿from datetime import date
 import os
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import unittest
 from unittest.mock import patch
 
-from backend.app.models.domain import FeedbackType, Movie, RecommendationProcessingStatus, SlotType, WishlistStatus
+from backend.app.models.domain import (
+    Feedback,
+    FeedbackType,
+    Movie,
+    RecommendationItem,
+    RecommendationProcessingStatus,
+    RecommendationSession,
+    SlotType,
+    ViewingHistory,
+    WishlistStatus,
+)
 from backend.app.recommenders.simple import build_content_profile
 from backend.app.services.recommendation_service import (
     FeedbackRequest,
@@ -30,6 +40,68 @@ class RecommendationServiceTest(unittest.TestCase):
         self.assertEqual(4, sum(1 for item in session.items if item.slot_type == SlotType.EXPLOIT))
         self.assertEqual(4, sum(1 for item in session.items if item.slot_type == SlotType.EXPLORE))
         self.assertEqual(8, len({item.movie.id for item in session.items}))
+
+    def test_bandit_hybrid_falls_back_to_hybrid_explore_when_training_set_is_too_small(self) -> None:
+        session = self.service.recommend("bandit_hybrid", explore_seed=3)
+
+        self.assertEqual("bandit_hybrid", session.strategy)
+        self.assertEqual(8, len(session.items))
+        self.assertEqual(4, sum(1 for item in session.items if item.slot_type == SlotType.EXPLOIT))
+        self.assertEqual(4, sum(1 for item in session.items if item.slot_type == SlotType.EXPLORE))
+        self.assertFalse(session.debug_metadata["bandit_used"])
+        self.assertEqual("insufficient_training_examples", session.debug_metadata["bandit_fallback_reason"])
+        self.assertEqual(0, session.debug_metadata["trainable_example_count"])
+        self.assertTrue(
+            all("bandit_sample" not in item.score_components for item in session.items if item.slot_type == SlotType.EXPLORE)
+        )
+
+    def test_bandit_hybrid_uses_bandit_ranked_explore_slots_when_training_set_is_ready(self) -> None:
+        repository = InMemoryMovieRepository(movies=_many_movies(40), history=[])
+        service = RecommendationService(repository)
+        _seed_bandit_training_history(repository, count=20)
+
+        session = service.recommend("bandit_hybrid", explore_seed=11, exposure_cooldown_sessions=0)
+
+        self.assertEqual("bandit_hybrid", session.strategy)
+        self.assertTrue(session.debug_metadata["bandit_used"])
+        self.assertEqual(20, session.debug_metadata["trainable_example_count"])
+        self.assertEqual("bandit_features_v1", session.debug_metadata["feature_version"])
+        self.assertEqual("bandit_rewards_v1", session.debug_metadata["reward_version"])
+        self.assertEqual([SlotType.EXPLOIT] * 4, [item.slot_type for item in session.items[:4]])
+        self.assertEqual([SlotType.EXPLORE] * 4, [item.slot_type for item in session.items[4:]])
+        for item in session.items[4:]:
+            self.assertIn("bandit_sample", item.score_components)
+            self.assertIn("bandit_mean", item.score_components)
+            self.assertIn("bandit_uncertainty", item.score_components)
+            self.assertEqual("bandit_features_v1", item.score_components["feature_version"])
+
+    def test_bandit_hybrid_does_not_leak_watched_movies(self) -> None:
+        movies = _many_movies(40)
+        watched_movie = movies[30]
+        repository = InMemoryMovieRepository(
+            movies=movies,
+            history=[ViewingHistory(movie_id=watched_movie.id, watched_date=date(2026, 1, 1), user_rating=4.5)],
+        )
+        service = RecommendationService(repository)
+        _seed_bandit_training_history(repository, count=20)
+
+        session = service.recommend("bandit_hybrid", explore_seed=11, exposure_cooldown_sessions=0)
+
+        self.assertNotIn(watched_movie.id, {item.movie.id for item in session.items})
+
+    def test_bandit_hybrid_does_not_require_latest_model_cache_for_correctness(self) -> None:
+        repository = InMemoryMovieRepository(movies=_many_movies(40), history=[])
+        service = RecommendationService(repository)
+        _seed_bandit_training_history(repository, count=20)
+
+        with patch(
+            "backend.app.services.recommendation_service.write_latest_model_cache",
+            side_effect=OSError("cache unavailable"),
+        ):
+            session = service.recommend("bandit_hybrid", explore_seed=11, exposure_cooldown_sessions=0)
+
+        self.assertTrue(session.debug_metadata["bandit_used"])
+        self.assertNotIn("bandit_fallback_reason", session.debug_metadata)
 
     def test_hybrid_recommendation_builds_content_profile_once(self) -> None:
         with patch(
@@ -221,6 +293,21 @@ class RecommendationServiceTest(unittest.TestCase):
         self.assertEqual(base_total - 1.5, once["total"])
         self.assertEqual(base_total - 3.0, twice["total"])
         self.assertIn(item.movie.id, self.repository.candidate_pool)
+
+    def test_maybe_later_penalty_expires_after_thirty_days(self) -> None:
+        session = self.service.recommend("hybrid", exposure_cooldown_sessions=0)
+        item = session.items[0]
+        base_total = self.service._score(item.movie, "hybrid")["total"]
+        self.service.submit_feedback(
+            session.id,
+            item.id,
+            FeedbackRequest(feedback_type=FeedbackType.MAYBE_LATER),
+        )
+        self.repository.feedback[-1].created_at = datetime.now(timezone.utc) - timedelta(days=31)
+
+        score = self.service._score_with_feedback_penalty(item.movie, "hybrid")
+
+        self.assertEqual(base_total, score["total"])
 
     def test_want_to_watch_adds_wishlist_and_excludes_movie_from_future_sessions(self) -> None:
         session = self.service.recommend("hybrid")
@@ -528,6 +615,38 @@ def _many_movies(count: int) -> list[Movie]:
         )
         for index in range(count)
     ]
+
+
+def _seed_bandit_training_history(repository: InMemoryMovieRepository, count: int) -> None:
+    for index, movie in enumerate(list(repository.movies_by_id.values())[:count], start=1):
+        item = RecommendationItem(
+            movie=movie,
+            rank=1,
+            slot_type=SlotType.EXPLORE,
+            score=float(index),
+            score_components={
+                "total": float(index),
+                "personal_preference": float(index) / 10.0,
+                "public_quality": movie.douban_rating,
+                "novelty": 0.0,
+            },
+            id=f"training-item-{index}",
+        )
+        session = RecommendationSession(
+            strategy="hybrid",
+            items=[item],
+            id=f"training-session-{index}",
+        )
+        repository.sessions[session.id] = session
+        repository.feedback.append(
+            Feedback(
+                session_id=session.id,
+                item_id=item.id,
+                movie_id=movie.id,
+                feedback_type=FeedbackType.MAYBE_LATER,
+                feedback_value=0.2,
+            )
+        )
 
 
 class _FakeRefreshConnection:

@@ -3,6 +3,7 @@ const { spawn } = require("child_process");
 const http = require("http");
 const path = require("path");
 const fs = require("fs");
+const { ensureBackend } = require("./backend-lifecycle.cjs");
 const { posterRequestHeaders } = require("./poster-request-policy.cjs");
 
 const BACKEND_HOST = "127.0.0.1";
@@ -226,8 +227,13 @@ app.whenReady().then(async () => {
   try {
     log(`Desktop app starting from ${repoRoot}`);
     configurePosterRequests();
-    startBackend();
-    backendReadyPromise = waitForHttp(`${BACKEND_URL}/openapi.json`).then(() => {
+    backendReadyPromise = ensureBackend({
+      backendUrl: BACKEND_URL,
+      healthUrl: `${BACKEND_URL}/openapi.json`,
+      log,
+      startBackend,
+      waitForHttp
+    }).then(() => {
       log("Backend ready");
       return BACKEND_URL;
     });

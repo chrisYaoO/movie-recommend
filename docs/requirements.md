@@ -129,9 +129,10 @@ Auxiliary actions:
 The user's rating scale is selective and personal:
 
 - below 4.0: negative feedback, disappointing or bad for the user's taste
-- 4.0 to 4.5: worth watching, medium-to-strong positive
-- 4.5 and above: essential favorite or very strong positive
-- missing rating: unknown, not negative
+- 4.0 to 4.2: good enough or pretty good
+- 4.3 to 4.5: very good
+- above 4.5: top-tier personal favorite, with 5.0 as the strongest signal
+- watched movies are expected to have a rating
 
 ### Baselines And Recommendation Strategies
 
@@ -205,7 +206,7 @@ Import, matching, metadata enrichment, candidate-pool processing, and evaluation
 
 - integrate the user's existing review tool
 - add TMDB/IMDb/Wikidata fallback enrichment
-- add learning-to-rank or contextual bandit from accumulated feedback
+- add `bandit_hybrid` backend strategy with Linear Thompson Sampling for explore slots, trained from accumulated recommendation feedback
 - add RL-style sequential recommendation if enough interaction data exists
 - add richer diversity controls
 - add recommendation explanation/debug panel

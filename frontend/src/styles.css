@@ -139,6 +139,10 @@ main {
   justify-content: flex-end;
 }
 
+.strategy-control {
+  min-width: 180px;
+}
+
 .toolbar.wide label {
   flex: 1;
 }

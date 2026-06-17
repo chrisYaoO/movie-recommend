@@ -1,13 +1,14 @@
-﻿import unittest
+import unittest
 
+from backend.app.models.domain import RecommendationSession
 from jobs.evaluate_recommendations import (
     CandidatePoolHealthSummary,
     RecommendationEvaluationItem,
+    RecommendationEvaluationResult,
     _run_seed,
     _summarize,
     render_text,
 )
-from jobs.evaluate_recommendations import RecommendationEvaluationResult
 
 
 class EvaluateRecommendationsJobTest(unittest.TestCase):
@@ -19,12 +20,21 @@ class EvaluateRecommendationsJobTest(unittest.TestCase):
             _item(2, 2, "explore", "m-1", "Movie One", watched=False, sources=("douban_top250:top1",)),
         )
 
-        summary = _summarize(items, runs=2)
+        summary = _summarize(
+            items,
+            runs=2,
+            historical_rewards_by_movie_id={"m-2": 0.10, "m-1": -1.0},
+            current_negative_movie_ids={"m-1"},
+        )
 
         self.assertEqual(4, summary.total_items)
         self.assertEqual(2, summary.unique_movies)
         self.assertEqual(1, summary.duplicate_in_session_count)
         self.assertEqual(1, summary.watched_leak_count)
+        self.assertEqual(3, summary.negative_feedback_recurrence_count)
+        self.assertEqual(2, summary.explore_slot_reward_count)
+        self.assertEqual(1, summary.explore_slot_positive_reward_count)
+        self.assertEqual(0.5, summary.explore_slot_reward_rate)
         self.assertEqual({"exploit": 2, "explore": 2}, summary.slot_mix)
         self.assertEqual({"douban_top250": 3, "douban_recommendation": 1}, summary.source_mix)
         self.assertEqual({"Movie One": 3}, summary.repeated_movies)
@@ -58,6 +68,39 @@ class EvaluateRecommendationsJobTest(unittest.TestCase):
         self.assertIn("active_source_mix:", report)
         self.assertIn("summary", report)
         self.assertIn("strategy=hybrid", report)
+        self.assertIn("negative_feedback_recurrence_count=0", report)
+        self.assertIn("explore_slot_reward_rate=n/a", report)
+
+    def test_summarizes_and_renders_bandit_metadata(self) -> None:
+        items = (_item(1, 1, "explore", "m-1", "Movie One"),)
+        sessions = (
+            RecommendationSession(
+                strategy="bandit_hybrid",
+                items=[],
+                debug_metadata={
+                    "trainable_example_count": 19,
+                    "bandit_used": False,
+                    "bandit_fallback_reason": "insufficient_training_examples",
+                },
+            ),
+        )
+
+        summary = _summarize(items, runs=1, sessions=sessions)
+        report = render_text(
+            RecommendationEvaluationResult(
+                strategy="bandit_hybrid",
+                items=items,
+                summary=summary,
+            )
+        )
+
+        self.assertEqual(19, summary.bandit_trainable_example_count)
+        self.assertEqual(0, summary.bandit_used_count)
+        self.assertEqual(1, summary.bandit_fallback_count)
+        self.assertEqual({"insufficient_training_examples": 1}, summary.bandit_fallback_reasons)
+        self.assertIn("bandit:", report)
+        self.assertIn("trainable_example_count=19", report)
+        self.assertIn("fallback_count=1", report)
 
     def test_run_seed_offsets_seed_by_run_index(self) -> None:
         self.assertIsNone(_run_seed(None, 0))
@@ -90,5 +133,3 @@ def _item(
 
 if __name__ == "__main__":
     unittest.main()
-
-

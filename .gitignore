@@ -19,3 +19,4 @@ desktop/runtime.log
 .scratch/*.log
 .scratch/db-cleanup-*.json
 .scratch/*before*.json
+.scratch/bandit/
