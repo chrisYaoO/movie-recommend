@@ -353,6 +353,55 @@ class RecommendationServiceTest(unittest.TestCase):
         self.assertEqual(RecommendationProcessingStatus.MAYBE_LATER, first_item.processing_status)
         self.assertIn(first_item.movie.id, self.repository.candidate_pool)
 
+    def test_undo_wishlist_feedback_clears_item_and_removes_active_wishlist(self) -> None:
+        session = self.service.recommend("hybrid")
+        first_item = session.items[0]
+        self.service.submit_feedback(
+            session.id,
+            first_item.id,
+            FeedbackRequest(feedback_type=FeedbackType.WANT_TO_WATCH),
+        )
+
+        updated = self.service.undo_recommendation_item_processing(session.id, first_item.id)
+
+        self.assertIsNone(updated.processing_status)
+        self.assertIsNone(updated.processed_at)
+        self.assertEqual([], self.service.to_wishlist_response()["items"])
+        self.assertNotIn(FeedbackType.WANT_TO_WATCH, [feedback.feedback_type for feedback in self.repository.feedback])
+        self.assertIn(first_item.movie.id, self.repository.candidate_pool)
+
+    def test_undo_not_interested_feedback_clears_item_and_restores_candidate(self) -> None:
+        session = self.service.recommend("hybrid")
+        first_item = session.items[0]
+        self.service.submit_feedback(
+            session.id,
+            first_item.id,
+            FeedbackRequest(feedback_type=FeedbackType.NOT_INTERESTED),
+        )
+
+        updated = self.service.undo_recommendation_item_processing(session.id, first_item.id)
+
+        self.assertIsNone(updated.processing_status)
+        self.assertIsNone(updated.processed_at)
+        self.assertNotIn(FeedbackType.NOT_INTERESTED, [feedback.feedback_type for feedback in self.repository.feedback])
+        self.assertIn(first_item.movie.id, self.repository.candidate_pool)
+
+    def test_undo_maybe_later_feedback_clears_item_and_removes_penalty_event(self) -> None:
+        session = self.service.recommend("hybrid", exposure_cooldown_sessions=0)
+        first_item = session.items[0]
+        self.service.submit_feedback(
+            session.id,
+            first_item.id,
+            FeedbackRequest(feedback_type=FeedbackType.MAYBE_LATER),
+        )
+
+        updated = self.service.undo_recommendation_item_processing(session.id, first_item.id)
+
+        self.assertIsNone(updated.processing_status)
+        self.assertIsNone(updated.processed_at)
+        self.assertNotIn(FeedbackType.MAYBE_LATER, [feedback.feedback_type for feedback in self.repository.feedback])
+        self.assertIn(first_item.movie.id, self.repository.candidate_pool)
+
     def test_clear_not_interested_makes_historical_negative_no_longer_effective(self) -> None:
         session = self.service.recommend("hybrid")
         first_item = session.items[0]

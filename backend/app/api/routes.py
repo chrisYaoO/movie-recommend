@@ -154,6 +154,17 @@ def submit_feedback(session_id: str, item_id: str, request: FeedbackRequest):
     return service.to_feedback_response(feedback)
 
 
+@router.delete("/recommendations/{session_id}/items/{item_id}/processing")
+def undo_recommendation_item_processing(session_id: str, item_id: str):
+    try:
+        item = service.undo_recommendation_item_processing(session_id, item_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return service.to_recommendation_item_response(item)
+
+
 @router.get("/wishlist")
 def get_wishlist(limit: int = Query(default=10, ge=1, le=50), offset: int = Query(default=0, ge=0)):
     return service.to_wishlist_response(limit=limit, offset=offset)

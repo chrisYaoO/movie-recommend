@@ -16,6 +16,7 @@ from backend.app.api.routes import (
     remove_from_wishlist,
     search_movies,
     should_prewarm_record_selenium,
+    undo_recommendation_item_processing,
 )
 from backend.app.models.domain import RecommendationProcessingStatus, WishlistStatus
 from backend.app.services.metadata_service import DoubanSeleniumDetailAdapter
@@ -224,6 +225,15 @@ class ApiRoutesTest(unittest.TestCase):
         self.assertEqual({"movie_id": "movie-1", "state": "not_interested"}, response)
         self.assertEqual(["movie-1"], fake_service.cleared_not_interested_movie_ids)
 
+    def test_undo_recommendation_item_processing_uses_service(self) -> None:
+        fake_service = _FakeRecommendationService()
+
+        with patch("backend.app.api.routes.service", fake_service):
+            response = undo_recommendation_item_processing("session-1", "item-1")
+
+        self.assertEqual({"id": "item-1", "processing_status": None}, response)
+        self.assertEqual([("session-1", "item-1")], fake_service.undone_recommendation_items)
+
 
 class _FakeMovieSearchService:
     def __init__(self, candidates):
@@ -295,6 +305,7 @@ class _FakeRecommendationService:
         self.not_interested_pages = []
         self.cleared_not_interested_movie_ids = []
         self.recommendation_requests = []
+        self.undone_recommendation_items = []
 
     def recommend(self, strategy="hybrid", explore_seed=None, exposure_cooldown_sessions=5):
         self.recommendation_requests.append((strategy, explore_seed, exposure_cooldown_sessions))
@@ -342,6 +353,13 @@ class _FakeRecommendationService:
 
     def to_not_interested_item_response(self, item):
         return {"movie_id": item["movie_id"], "state": "not_interested"}
+
+    def undo_recommendation_item_processing(self, session_id, item_id):
+        self.undone_recommendation_items.append((session_id, item_id))
+        return {"id": item_id, "processing_status": None}
+
+    def to_recommendation_item_response(self, item):
+        return item
 
 
 if __name__ == "__main__":

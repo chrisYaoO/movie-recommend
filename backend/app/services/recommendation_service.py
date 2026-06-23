@@ -115,11 +115,17 @@ class MovieRepository(Protocol):
         status: RecommendationProcessingStatus,
     ) -> RecommendationItem: ...
 
+    def clear_recommendation_item_processed(self, session_id: str, item_id: str) -> RecommendationItem: ...
+
+    def delete_latest_feedback(self, session_id: str, item_id: str, feedback_type: FeedbackType) -> Feedback | None: ...
+
     def deactivate_candidate_pool_movie(self, movie_id: str) -> None: ...
 
     def restore_candidate_pool_movie_if_eligible(self, movie_id: str) -> None: ...
 
     def list_active_wishlist(self) -> list[WishlistItem]: ...
+
+    def find_active_wishlist_by_movie(self, movie_id: str) -> WishlistItem | None: ...
 
     def find_wishlist_item(self, wishlist_id: str) -> WishlistItem | None: ...
 
@@ -204,6 +210,20 @@ class InMemoryMovieRepository:
         item.processing_status = status
         item.processed_at = datetime.now(timezone.utc)
         return item
+
+    def clear_recommendation_item_processed(self, session_id: str, item_id: str) -> RecommendationItem:
+        session = self.sessions[session_id]
+        item = next(candidate for candidate in session.items if candidate.id == item_id)
+        item.processing_status = None
+        item.processed_at = None
+        return item
+
+    def delete_latest_feedback(self, session_id: str, item_id: str, feedback_type: FeedbackType) -> Feedback | None:
+        for index in range(len(self.feedback) - 1, -1, -1):
+            feedback = self.feedback[index]
+            if feedback.session_id == session_id and feedback.item_id == item_id and feedback.feedback_type == feedback_type:
+                return self.feedback.pop(index)
+        return None
 
     def deactivate_candidate_pool_movie(self, movie_id: str) -> None:
         self.candidate_pool.pop(movie_id, None)
@@ -635,6 +655,42 @@ class PostgresRecommendationRepository:
         item.processing_status = status
         item.processed_at = processed_at
         return item
+
+    def clear_recommendation_item_processed(self, session_id: str, item_id: str) -> RecommendationItem:
+        self.connection.execute(
+            """
+            UPDATE recommendation_items
+            SET processing_status = NULL, processed_at = NULL
+            WHERE session_id = %s AND id = %s
+            """,
+            (session_id, item_id),
+        )
+        session = self.get_session(session_id)
+        if session is None:
+            raise KeyError("recommendation session not found")
+        item = next(candidate for candidate in session.items if candidate.id == item_id)
+        item.processing_status = None
+        item.processed_at = None
+        return item
+
+    def delete_latest_feedback(self, session_id: str, item_id: str, feedback_type: FeedbackType) -> Feedback | None:
+        row = self.connection.execute(
+            """
+            SELECT id
+            FROM feedback
+            WHERE session_id = %s AND item_id = %s AND feedback_type = %s
+            ORDER BY created_at DESC
+            LIMIT 1
+            """,
+            (session_id, item_id, feedback_type.value),
+        ).fetchone()
+        if row is None:
+            return None
+        feedback_id = str(row["id"])
+        self.connection.execute("DELETE FROM feedback WHERE id = %s", (feedback_id,))
+        deleted = next((feedback for feedback in self.feedback if feedback.id == feedback_id), None)
+        self.feedback = [feedback for feedback in self.feedback if feedback.id != feedback_id]
+        return deleted
 
     def deactivate_candidate_pool_movie(self, movie_id: str) -> None:
         self.connection.execute(
@@ -1134,6 +1190,31 @@ class RecommendationService:
         self.repository.deactivate_candidate_pool_movie(item.movie.id)
         return processed
 
+    def undo_recommendation_item_processing(self, session_id: str, item_id: str) -> RecommendationItem:
+        session = self.repository.get_session(session_id)
+        if session is None:
+            raise KeyError("recommendation session not found")
+        item = next((candidate for candidate in session.items if candidate.id == item_id), None)
+        if item is None:
+            raise KeyError("recommendation item not found")
+
+        previous_status = item.processing_status
+        if previous_status == RecommendationProcessingStatus.ADDED_TO_WISHLIST:
+            wishlist_item = self.repository.find_active_wishlist_by_movie(item.movie.id)
+            if wishlist_item is not None:
+                self.repository.remove_wishlist_item(wishlist_item)
+            self.repository.delete_latest_feedback(session_id, item_id, FeedbackType.WANT_TO_WATCH)
+            self.repository.restore_candidate_pool_movie_if_eligible(item.movie.id)
+        elif previous_status == RecommendationProcessingStatus.NOT_INTERESTED:
+            self.repository.delete_latest_feedback(session_id, item_id, FeedbackType.NOT_INTERESTED)
+            self.repository.restore_candidate_pool_movie_if_eligible(item.movie.id)
+        elif previous_status == RecommendationProcessingStatus.MAYBE_LATER:
+            self.repository.delete_latest_feedback(session_id, item_id, FeedbackType.MAYBE_LATER)
+        elif previous_status == RecommendationProcessingStatus.WATCHED:
+            self.repository.restore_candidate_pool_movie_if_eligible(item.movie.id)
+
+        return self.repository.clear_recommendation_item_processed(session_id, item_id)
+
     def mark_watched_movie(self, movie_id: str) -> None:
         self.repository.deactivate_candidate_pool_movie(movie_id)
 
@@ -1409,21 +1490,21 @@ class RecommendationService:
             "strategy": session.strategy,
             "created_at": session.created_at.isoformat(),
             "debug_metadata": session.debug_metadata,
-            "items": [
-                {
-                    "id": item.id,
-                    "rank": item.rank,
-                    "slot_type": item.slot_type.value,
-                    "score": item.score,
-                    "score_components": item.score_components,
-                    "source_ref": item.source_ref,
-                    "source_label": self._source_label_for_item(item),
-                    "processing_status": item.processing_status.value if item.processing_status else None,
-                    "processed_at": item.processed_at.isoformat() if item.processed_at else None,
-                    "movie": self._movie_response(item.movie),
-                }
-                for item in session.items
-            ],
+            "items": [self.to_recommendation_item_response(item) for item in session.items],
+        }
+
+    def to_recommendation_item_response(self, item: RecommendationItem) -> dict:
+        return {
+            "id": item.id,
+            "rank": item.rank,
+            "slot_type": item.slot_type.value,
+            "score": item.score,
+            "score_components": item.score_components,
+            "source_ref": item.source_ref,
+            "source_label": self._source_label_for_item(item),
+            "processing_status": item.processing_status.value if item.processing_status else None,
+            "processed_at": item.processed_at.isoformat() if item.processed_at else None,
+            "movie": self._movie_response(item.movie),
         }
 
     def to_feedback_response(self, feedback: Feedback) -> dict:

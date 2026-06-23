@@ -16,7 +16,4 @@ frontend/node_modules/
 frontend/dist/
 desktop/node_modules/
 desktop/runtime.log
-.scratch/*.log
-.scratch/db-cleanup-*.json
-.scratch/*before*.json
-.scratch/bandit/
+.scratch/*
