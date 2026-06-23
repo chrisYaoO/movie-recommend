@@ -1,110 +1,40 @@
-import React, { FormEvent, useEffect, useMemo, useState } from "react";
+import { FormEvent, useEffect, useState } from "react";
 import { createRoot } from "react-dom/client";
 import "./styles.css";
-
-type Tab = "recommend" | "record" | "wishlist" | "notInterested";
-type RecommendationStrategy = "hybrid" | "bandit_hybrid";
-
-type SearchCandidate = {
-  subject_id: string;
-  title: string;
-  year: number | null;
-  director: string | null;
-  url: string | null;
-};
-
-type RecommendationItem = {
-  id: string;
-  rank: number;
-  slot_type: "exploit" | "explore";
-  score: number;
-  source_ref: string | null;
-  source_label: string | null;
-  processing_status: string | null;
-  processed_at: string | null;
-  movie: {
-    id: string;
-    title: string;
-    year: number;
-    director: string;
-    directors: string[];
-    main_cast: string[];
-    cast: string[];
-    douban_rating: number;
-    douban_url: string;
-    poster_url: string | null;
-  };
-};
-
-type RecommendationSession = {
-  id: string;
-  strategy: string;
-  created_at: string;
-  debug_metadata?: Record<string, unknown>;
-  items: RecommendationItem[];
-};
-
-type WishlistItem = {
-  id: string;
-  status: string;
-  source_session_id: string;
-  score: number | null;
-  source_ref: string | null;
-  source_label: string | null;
-  created_at: string;
-  closed_at: string | null;
-  movie: RecommendationItem["movie"];
-};
-
-type NotInterestedItem = {
-  id: string;
-  movie_id: string;
-  state: "not_interested";
-  state_changed_at: string;
-  session_id: string;
-  item_id: string;
-  movie: RecommendationItem["movie"];
-};
-
-type RecordForm = {
-  watched_date: string;
-  rating: string;
-  quality: "1080p" | "4K" | "Other";
-  custom_quality: string;
-  comment: string;
-};
-
-type RecordHandoff = {
-  movie: SearchCandidate;
-  sourceTab: Tab;
-  session_id?: string;
-  recommendation_item_id?: string;
-  wishlist_id?: string;
-};
-
-type ProcessedRecommendationItem = {
-  session_id: string;
-  recommendation_item_id: string;
-  processing_status: string | null;
-  processed_at: string | null;
-};
-
-type RecordViewingHistoryResponse = {
-  session_id?: string;
-  recommendation_item_id?: string;
-  processing_status?: string | null;
-  processed_at?: string | null;
-};
-
-const today = new Date().toISOString().slice(0, 10);
-const ACTIVE_TAB_KEY = "movies.frontend.activeTab";
-const RECOMMENDATION_SESSION_KEY = "movies.frontend.currentRecommendationSession";
-const WISHLIST_CACHE_KEY = "movies.frontend.wishlist.firstPage";
-const NOT_INTERESTED_CACHE_KEY = "movies.frontend.notInterested.firstPage";
-const RECORD_DRAFT_KEY = "movies.frontend.recordWatchedDraft";
-const DEBUG_MODE_KEY = "movies.frontend.debugMode";
-const RECOMMENDATION_STRATEGY_KEY = "movies.frontend.recommendationStrategy";
-const BASELINE_HYBRID_TOTAL = 23.4568;
+import { api, errorMessage, isErrorStatus } from "./api";
+import { GearIcon, MoonIcon, RefreshIcon, SearchIcon, SunIcon, TrashIcon } from "./components/Icons";
+import { SharedMovieCard } from "./components/SharedMovieCard";
+import { StatusBanner, StatusText } from "./components/Status";
+import {
+  ACTIVE_TAB_KEY,
+  DEBUG_MODE_KEY,
+  NOT_INTERESTED_CACHE_KEY,
+  RECOMMENDATION_SESSION_KEY,
+  RECOMMENDATION_STRATEGY_KEY,
+  RECORD_DRAFT_KEY,
+  THEME_MODE_KEY,
+  WISHLIST_CACHE_KEY,
+  today
+} from "./constants";
+import { usePagedMovieList } from "./hooks/usePagedMovieList";
+import { useStoredState } from "./hooks/useStoredState";
+import type {
+  NotInterestedItem,
+  ProcessedRecommendationItem,
+  RecommendationItem,
+  RecommendationSession,
+  RecommendationStrategy,
+  RecordForm,
+  RecordHandoff,
+  RecordViewingHistoryResponse,
+  SearchCandidate,
+  Tab,
+  ThemeMode,
+  UndoRecommendationProcessingResponse,
+  WishlistItem
+} from "./types";
+import { nextThemeMode, themeLabel } from "./utils/theme";
+import { normalizedScore, recommendationReason, searchCandidateFromMovie } from "./utils/movie";
 
 function defaultRecordForm(): RecordForm {
   return {
@@ -116,31 +46,23 @@ function defaultRecordForm(): RecordForm {
   };
 }
 
-function useStoredState<T>(key: string, initialValue: T) {
-  const [value, setValue] = useState<T>(() => {
-    try {
-      const stored = window.localStorage.getItem(key);
-      return stored ? (JSON.parse(stored) as T) : initialValue;
-    } catch {
-      return initialValue;
-    }
-  });
-
-  useEffect(() => {
-    window.localStorage.setItem(key, JSON.stringify(value));
-  }, [key, value]);
-
-  return [value, setValue] as const;
-}
-
 function App() {
   const [tab, setTab] = useStoredState<Tab>(ACTIVE_TAB_KEY, "recommend");
   const [debugMode, setDebugMode] = useStoredState<boolean>(DEBUG_MODE_KEY, false);
+  const [themeMode, setThemeMode] = useStoredState<ThemeMode>(THEME_MODE_KEY, "system");
   const [recordHandoff, setRecordHandoff] = useState<RecordHandoff | null>(null);
   const [processedRecommendationItem, setProcessedRecommendationItem] = useState<ProcessedRecommendationItem | null>(null);
   const [wishlistRefreshKey, setWishlistRefreshKey] = useState(0);
   const [notInterestedRefreshKey, setNotInterestedRefreshKey] = useState(0);
   const loadPosters = !debugMode;
+
+  useEffect(() => {
+    if (themeMode === "system") {
+      document.documentElement.removeAttribute("data-theme");
+      return;
+    }
+    document.documentElement.setAttribute("data-theme", themeMode);
+  }, [themeMode]);
 
   function switchTab(nextTab: Tab) {
     if (nextTab === tab) return;
@@ -154,27 +76,61 @@ function App() {
     switchTab("record");
   }
 
+  function cycleTheme() {
+    setThemeMode(nextThemeMode(themeMode));
+  }
+
   return (
     <div className="app-shell">
       <header className="topbar">
         <nav className="tabs" aria-label="Main views">
-          <button className={tab === "recommend" ? "active" : ""} onClick={() => switchTab("recommend")}>
+          <button
+            className={tab === "recommend" ? "active" : ""}
+            onClick={() => switchTab("recommend")}
+            aria-current={tab === "recommend" ? "page" : undefined}
+          >
             Recommend
           </button>
-          <button className={tab === "record" ? "active" : ""} onClick={() => switchTab("record")}>
+          <button
+            className={tab === "record" ? "active" : ""}
+            onClick={() => switchTab("record")}
+            aria-current={tab === "record" ? "page" : undefined}
+          >
             Add watched
           </button>
-          <button className={tab === "wishlist" ? "active" : ""} onClick={() => switchTab("wishlist")}>
+          <button
+            className={tab === "wishlist" ? "active" : ""}
+            onClick={() => switchTab("wishlist")}
+            aria-current={tab === "wishlist" ? "page" : undefined}
+          >
             Wishlist
           </button>
-          <button className={tab === "notInterested" ? "active" : ""} onClick={() => switchTab("notInterested")}>
+          <button
+            className={tab === "notInterested" ? "active" : ""}
+            onClick={() => switchTab("notInterested")}
+            aria-current={tab === "notInterested" ? "page" : undefined}
+          >
             Not interested
           </button>
         </nav>
-        <label className="debug-toggle">
-          <input type="checkbox" checked={debugMode} onChange={(event) => setDebugMode(event.target.checked)} />
-          Debug
-        </label>
+        <div className="topbar-controls">
+          <button
+            type="button"
+            className="theme-current-button"
+            onClick={cycleTheme}
+            aria-label={`Current theme: ${themeLabel(themeMode)}. Click to switch to ${themeLabel(nextThemeMode(themeMode))}.`}
+            title={`Theme: ${themeLabel(themeMode)}`}
+          >
+            <ThemeIcon mode={themeMode} />
+          </button>
+          <details className="debug-menu">
+            <summary>More</summary>
+            <label className="debug-toggle">
+              <input type="checkbox" checked={debugMode} onChange={(event) => setDebugMode(event.target.checked)} />
+              Debug mode
+            </label>
+          </details>
+        </div>
       </header>
       <main>
         <div hidden={tab !== "recommend"}>
@@ -221,6 +177,7 @@ function RecommendationView({
   const [strategy, setStrategy] = useStoredState<RecommendationStrategy>(RECOMMENDATION_STRATEGY_KEY, "hybrid");
   const [status, setStatus] = useState("");
   const [loading, setLoading] = useState(false);
+  const [pendingItemIds, setPendingItemIds] = useState<Set<string>>(() => new Set());
 
   useEffect(() => {
     let cancelled = false;
@@ -230,7 +187,7 @@ function RecommendationView({
           const synced = await api<RecommendationSession>(`/recommendations/${session.id}`);
           if (!cancelled) setSession(synced);
         } catch (error) {
-          if (!cancelled) setStatus(errorMessage(error));
+          if (!cancelled) setStatus(`Could not sync recommendation session: ${errorMessage(error)}. Showing cached results.`);
         }
         return;
       }
@@ -271,7 +228,7 @@ function RecommendationView({
       const data = await api<RecommendationSession>(`/recommendations${query}`);
       setSession(data);
     } catch (error) {
-      setStatus(errorMessage(error));
+      setStatus(`Could not refresh recommendations: ${errorMessage(error)}. Showing cached results.`);
     } finally {
       setLoading(false);
     }
@@ -296,7 +253,8 @@ function RecommendationView({
   }
 
   async function submitFeedback(item: RecommendationItem, feedbackType: string) {
-    if (!session) return;
+    if (!session || pendingItemIds.has(item.id)) return;
+    setPendingItem(item.id, true);
     setStatus("");
     try {
       await api(`/recommendations/${session.id}/items/${item.id}/feedback`, {
@@ -321,28 +279,38 @@ function RecommendationView({
       }
       setStatus("Saved");
     } catch (error) {
-      setStatus(errorMessage(error));
+      setStatus(`Could not save feedback: ${errorMessage(error)}`);
+    } finally {
+      setPendingItem(item.id, false);
     }
   }
 
   return (
     <section className="panel">
-      <div className="toolbar align-right">
-        <label className="strategy-control">
-          Strategy
-          <select
-            value={strategy}
-            onChange={(event) => void changeStrategy(event.target.value as RecommendationStrategy)}
+      <div className="toolbar recommendation-toolbar">
+        <div className="recommendation-controls">
+          <label className="strategy-control">
+            Strategy
+            <select
+              value={strategy}
+              onChange={(event) => void changeStrategy(event.target.value as RecommendationStrategy)}
+              disabled={loading}
+            >
+              <option value="hybrid">Hybrid</option>
+              <option value="bandit_hybrid">Bandit hybrid</option>
+            </select>
+          </label>
+          <button
+            className="primary icon-button"
+            onClick={refreshRecommendations}
             disabled={loading}
+            aria-label="Refresh recommendations"
+            title="Refresh"
           >
-            <option value="hybrid">Hybrid</option>
-            <option value="bandit_hybrid">Bandit hybrid</option>
-          </select>
-        </label>
-        <button className="primary" onClick={refreshRecommendations} disabled={loading}>
-          Refresh
-        </button>
-        <StatusText value={status} />
+            <RefreshIcon />
+          </button>
+        </div>
+        <StatusBanner value={status} onRetry={isErrorStatus(status) ? refreshRecommendations : undefined} />
       </div>
       <div className="movie-grid">
         {session?.items.map((item) => (
@@ -352,20 +320,32 @@ function RecommendationView({
             badge={item.slot_type === "explore" ? "Explore" : "Exploit"}
             score={normalizedScore(item.score)}
             sourceLabel={item.source_label || item.source_ref || undefined}
+            why={recommendationReason(item)}
             processedStatus={item.processing_status}
             loadPoster={loadPosters}
+            onUndoProcessed={item.processing_status && !pendingItemIds.has(item.id) ? () => undoProcessing(item) : undefined}
           >
             <div className="button-row">
-              <button onClick={() => startWatched(item)} disabled={Boolean(item.processing_status)}>
+              <button onClick={() => startWatched(item)} disabled={isRecommendationActionDisabled(item)}>
                 Watched
               </button>
-              <button onClick={() => submitFeedback(item, "want_to_watch")} disabled={Boolean(item.processing_status)}>
+              <button
+                onClick={() => submitFeedback(item, "want_to_watch")}
+                disabled={isRecommendationActionDisabled(item)}
+                aria-label="Add to wishlist"
+                title="Add to wishlist"
+              >
                 +
               </button>
-              <button onClick={() => submitFeedback(item, "not_interested")} disabled={Boolean(item.processing_status)}>
+              <button
+                onClick={() => submitFeedback(item, "not_interested")}
+                disabled={isRecommendationActionDisabled(item)}
+                aria-label="Not interested"
+                title="Not interested"
+              >
                 -
               </button>
-              <button onClick={() => submitFeedback(item, "maybe_later")} disabled={Boolean(item.processing_status)}>
+              <button onClick={() => submitFeedback(item, "maybe_later")} disabled={isRecommendationActionDisabled(item)}>
                 Later
               </button>
             </div>
@@ -374,6 +354,44 @@ function RecommendationView({
       </div>
     </section>
   );
+
+  async function undoProcessing(item: RecommendationItem) {
+    if (!session || pendingItemIds.has(item.id)) return;
+    setPendingItem(item.id, true);
+    setStatus("");
+    try {
+      const updated = await api<UndoRecommendationProcessingResponse>(
+        `/recommendations/${session.id}/items/${item.id}/processing`,
+        { method: "DELETE" }
+      );
+      setSession({
+        ...session,
+        items: session.items.map((candidate) =>
+          candidate.id === item.id
+            ? { ...candidate, processing_status: updated.processing_status, processed_at: updated.processed_at }
+            : candidate
+        )
+      });
+      setStatus("Undone");
+    } catch (error) {
+      setStatus(`Could not undo: ${errorMessage(error)}`);
+    } finally {
+      setPendingItem(item.id, false);
+    }
+  }
+
+  function isRecommendationActionDisabled(item: RecommendationItem) {
+    return Boolean(item.processing_status) || pendingItemIds.has(item.id);
+  }
+
+  function setPendingItem(itemId: string, pending: boolean) {
+    setPendingItemIds((current) => {
+      const next = new Set(current);
+      if (pending) next.add(itemId);
+      else next.delete(itemId);
+      return next;
+    });
+  }
 }
 
 function RecordWatchedView({
@@ -395,8 +413,8 @@ function RecordWatchedView({
   useEffect(() => {
     if (!handoff) return;
     setSelected(handoff.movie);
-    setQuery(handoff.movie.title);
-    setCandidates([handoff.movie]);
+    setQuery("");
+    setCandidates([]);
   }, [handoff]);
 
   async function search(event: FormEvent) {
@@ -462,14 +480,18 @@ function RecordWatchedView({
 
   return (
     <section className="record-layout">
-      <form className="panel" onSubmit={search}>
-        <div className="toolbar wide">
-          <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Enter name or id" />
-          <button className="primary" disabled={loading || !query.trim()}>
-            Search
+      <form className="panel record-search-panel" onSubmit={search}>
+        <div className="record-search-row">
+          <input
+            value={query}
+            onChange={(event) => setQuery(event.target.value)}
+            placeholder="Search Douban by title or subject id"
+          />
+          <button className="primary icon-button" disabled={loading || !query.trim()} aria-label="Search" title="Search">
+            <SearchIcon />
           </button>
-          <StatusText value={status} />
         </div>
+        <StatusText value={status} />
         <div className="candidate-list">
           {candidates.map((candidate) => (
             <button
@@ -479,55 +501,66 @@ function RecordWatchedView({
               onClick={() => setSelected(candidate)}
             >
               <span>{candidate.title}</span>
-              <small>
-                {[candidate.year, candidate.director].filter(Boolean).join(" · ") || candidate.subject_id}
-              </small>
+              <small>{recordCandidateMeta(candidate)}</small>
             </button>
           ))}
         </div>
       </form>
-      <form className="panel form-grid" onSubmit={submit}>
-        <h2>{selected ? selected.title : "Selected movie"}</h2>
-        <label>
-          Date
-          <input
-            type="date"
-            value={form.watched_date}
-            onChange={(event) => setForm({ ...form, watched_date: event.target.value })}
-          />
-        </label>
-        <label>
-          Rating
-          <input
-            type="number"
-            min="0"
-            max="5"
-            step="0.1"
-            value={form.rating}
-            onChange={(event) => setForm({ ...form, rating: event.target.value })}
-          />
-        </label>
-        <label>
-          Quality
-          <select value={form.quality} onChange={(event) => setForm({ ...form, quality: event.target.value as RecordForm["quality"] })}>
-            <option value="1080p">1080p</option>
-            <option value="4K">4K</option>
-            <option value="Other">Other</option>
-          </select>
-        </label>
-        {form.quality === "Other" && (
+      <form className="panel record-form-panel" onSubmit={submit}>
+        <div className="record-section-header">
+          <div>
+            <h2>{selected ? selected.title : "Review"}</h2>
+            {selected && <p>{recordCandidateMeta(selected)}</p>}
+          </div>
+        </div>
+        <div className="form-grid">
           <label>
-            Custom quality
-            <input value={form.custom_quality} onChange={(event) => setForm({ ...form, custom_quality: event.target.value })} />
+            Date
+            <input
+              type="date"
+              value={form.watched_date}
+              onChange={(event) => setForm({ ...form, watched_date: event.target.value })}
+            />
           </label>
-        )}
-        <label className="span-2">
-          Comment
-          <textarea value={form.comment} onChange={(event) => setForm({ ...form, comment: event.target.value })} />
-        </label>
-        <button className="primary span-2" disabled={loading || !selected}>
-          Save
-        </button>
+          <label>
+            Rating
+            <input
+              type="number"
+              min="0"
+              max="5"
+              step="0.1"
+              value={form.rating}
+              onChange={(event) => setForm({ ...form, rating: event.target.value })}
+            />
+          </label>
+          <label>
+            Quality
+            <select value={form.quality} onChange={(event) => setForm({ ...form, quality: event.target.value as RecordForm["quality"] })}>
+              <option value="1080p">1080p</option>
+              <option value="4K">4K</option>
+              <option value="Other">Other</option>
+            </select>
+          </label>
+          {form.quality === "Other" && (
+            <label>
+              Custom quality
+              <input value={form.custom_quality} onChange={(event) => setForm({ ...form, custom_quality: event.target.value })} />
+            </label>
+          )}
+          <label className="span-2">
+            Comment
+            <textarea
+              value={form.comment}
+              onChange={(event) => setForm({ ...form, comment: event.target.value })}
+              placeholder="Optional notes"
+            />
+          </label>
+        </div>
+        <div className="form-actions">
+          <button className="primary" disabled={loading || !selected}>
+            Save
+          </button>
+        </div>
       </form>
     </section>
   );
@@ -542,69 +575,42 @@ function WishlistView({
   refreshKey: number;
   loadPosters: boolean;
 }) {
-  const [items, setItems] = useStoredState<WishlistItem[]>(WISHLIST_CACHE_KEY, []);
-  const [status, setStatus] = useState("");
-  const [loaded, setLoaded] = useState(false);
-  const [total, setTotal] = useState<number | null>(null);
-  const [loading, setLoading] = useState(false);
-  const [filterText, setFilterText] = useState("");
-  const visibleItems = useMemo(
-    () => items.filter((item) => movieMatchesFilter(item.movie, filterText)),
-    [items, filterText]
-  );
-
-  useEffect(() => {
-    void loadWishlist();
-  }, [refreshKey]);
-
-  useEffect(() => {
-    function onScroll() {
-      const nearBottom = window.innerHeight + window.scrollY >= document.documentElement.scrollHeight - 240;
-      if (nearBottom) void loadNextPage();
-    }
-    window.addEventListener("scroll", onScroll);
-    return () => window.removeEventListener("scroll", onScroll);
-  }, [items.length, total, loading]);
-
-  async function loadWishlist() {
-    setLoading(true);
-    setStatus("");
-    try {
-      const data = await api<{ items: WishlistItem[]; total: number }>("/wishlist?limit=10&offset=0");
-      setItems(data.items);
-      setTotal(data.total);
-      setLoaded(true);
-    } catch (error) {
-      setStatus(errorMessage(error));
-    } finally {
-      setLoading(false);
-    }
-  }
-
-  async function loadNextPage() {
-    if (loading || (total !== null && items.length >= total)) return;
-    setLoading(true);
-    setStatus("");
-    try {
-      const data = await api<{ items: WishlistItem[]; total: number }>(`/wishlist?limit=10&offset=${items.length}`);
-      setItems([...items, ...data.items]);
-      setTotal(data.total);
-      setLoaded(true);
-    } catch (error) {
-      setStatus(errorMessage(error));
-    } finally {
-      setLoading(false);
-    }
-  }
+  const {
+    items,
+    setItems,
+    status,
+    setStatus,
+    loaded,
+    total,
+    setTotal,
+    loading,
+    filterText,
+    setFilterText,
+    visibleItems,
+    loadFirstPage,
+    loadNextPage,
+    sentinelRef
+  } = usePagedMovieList<WishlistItem>({
+    cacheKey: WISHLIST_CACHE_KEY,
+    endpoint: "/wishlist",
+    refreshKey,
+    loadError: "Could not load wishlist",
+    loadMoreError: "Could not load more wishlist items"
+  });
+  const [pendingItemIds, setPendingItemIds] = useState<Set<string>>(() => new Set());
 
   async function removeWishlistItem(item: WishlistItem) {
+    if (pendingItemIds.has(item.id)) return;
+    setPendingItem(item.id, true);
     setStatus("");
     try {
       await api(`/wishlist/${item.id}`, { method: "DELETE" });
-      setItems(items.filter((candidate) => candidate.id !== item.id));
+      setItems((current) => current.filter((candidate) => candidate.id !== item.id));
       setTotal((current) => (current === null ? current : Math.max(0, current - 1)));
     } catch (error) {
-      setStatus(errorMessage(error));
+      setStatus(`Could not remove wishlist item: ${errorMessage(error)}`);
+    } finally {
+      setPendingItem(item.id, false);
     }
   }
 
@@ -619,9 +625,10 @@ function WishlistView({
   return (
     <section className="panel">
       <div className="toolbar wide">
-        <input value={filterText} onChange={(event) => setFilterText(event.target.value)} placeholder="Filter" />
-        <StatusText value={status} />
+        <input value={filterText} onChange={(event) => setFilterText(event.target.value)} placeholder="Search" />
+        <StatusBanner value={status} onRetry={isErrorStatus(status) ? () => void loadFirstPage() : undefined} />
       </div>
+      {!loaded && loading && <LoadingMovieGrid />}
       <div className="movie-grid">
         {visibleItems.map((item) => (
           <SharedMovieCard
@@ -634,7 +641,13 @@ function WishlistView({
           >
             <div className="button-row">
               <button onClick={() => startWatched(item)}>Watched</button>
-              <button className="icon-button" onClick={() => removeWishlistItem(item)} aria-label="Remove" title="Remove">
+              <button
+                className="icon-button"
+                onClick={() => removeWishlistItem(item)}
+                disabled={pendingItemIds.has(item.id)}
+                aria-label="Remove"
+                title="Remove"
+              >
                 <TrashIcon />
               </button>
             </div>
@@ -646,87 +659,83 @@ function WishlistView({
           {loading ? "Loading" : "Load more"}
         </button>
       )}
-      {loaded && items.length === 0 && <p className="empty">No active wishlist items.</p>}
-      {loaded && items.length > 0 && visibleItems.length === 0 && <p className="empty">No matching wishlist items.</p>}
+      <div ref={sentinelRef} aria-hidden="true" />
+      {loaded && items.length === 0 && (
+        <EmptyState
+          title="No active wishlist items"
+          description="Movies you add from recommendations will show up here until you watch or remove them."
+          actionLabel="Refresh"
+          onAction={() => void loadFirstPage()}
+        />
+      )}
+      {loaded && items.length > 0 && visibleItems.length === 0 && (
+        <EmptyState
+          title="No matching wishlist items"
+          description="Try a different title, year, director, or cast name."
+          actionLabel="Clear filter"
+          onAction={() => setFilterText("")}
+        />
+      )}
     </section>
   );
+
+  function setPendingItem(itemId: string, pending: boolean) {
+    setPendingItemIds((current) => {
+      const next = new Set(current);
+      if (pending) next.add(itemId);
+      else next.delete(itemId);
+      return next;
+    });
+  }
 }
 
 function NotInterestedView({ refreshKey, loadPosters }: { refreshKey: number; loadPosters: boolean }) {
-  const [items, setItems] = useStoredState<NotInterestedItem[]>(NOT_INTERESTED_CACHE_KEY, []);
-  const [status, setStatus] = useState("");
-  const [loaded, setLoaded] = useState(false);
-  const [total, setTotal] = useState<number | null>(null);
-  const [loading, setLoading] = useState(false);
-  const [filterText, setFilterText] = useState("");
-  const visibleItems = useMemo(
-    () => items.filter((item) => movieMatchesFilter(item.movie, filterText)),
-    [items, filterText]
-  );
-
-  useEffect(() => {
-    void loadNotInterested();
-  }, [refreshKey]);
-
-  useEffect(() => {
-    function onScroll() {
-      const nearBottom = window.innerHeight + window.scrollY >= document.documentElement.scrollHeight - 240;
-      if (nearBottom) void loadNextPage();
-    }
-    window.addEventListener("scroll", onScroll);
-    return () => window.removeEventListener("scroll", onScroll);
-  }, [items.length, total, loading]);
-
-  async function loadNotInterested() {
-    setLoading(true);
-    setStatus("");
-    try {
-      const data = await api<{ items: NotInterestedItem[]; total: number }>("/not-interested?limit=10&offset=0");
-      setItems(data.items);
-      setTotal(data.total);
-      setLoaded(true);
-    } catch (error) {
-      setStatus(errorMessage(error));
-    } finally {
-      setLoading(false);
-    }
-  }
-
-  async function loadNextPage() {
-    if (loading || (total !== null && items.length >= total)) return;
-    setLoading(true);
-    setStatus("");
-    try {
-      const data = await api<{ items: NotInterestedItem[]; total: number }>(
-        `/not-interested?limit=10&offset=${items.length}`
-      );
-      setItems([...items, ...data.items]);
-      setTotal(data.total);
-      setLoaded(true);
-    } catch (error) {
-      setStatus(errorMessage(error));
-    } finally {
-      setLoading(false);
-    }
-  }
+  const {
+    items,
+    setItems,
+    status,
+    setStatus,
+    loaded,
+    total,
+    setTotal,
+    loading,
+    filterText,
+    setFilterText,
+    visibleItems,
+    loadFirstPage,
+    loadNextPage,
+    sentinelRef
+  } = usePagedMovieList<NotInterestedItem>({
+    cacheKey: NOT_INTERESTED_CACHE_KEY,
+    endpoint: "/not-interested",
+    refreshKey,
+    loadError: "Could not load not-interested movies",
+    loadMoreError: "Could not load more not-interested movies"
+  });
+  const [pendingItemIds, setPendingItemIds] = useState<Set<string>>(() => new Set());
 
   async function removeNotInterested(item: NotInterestedItem) {
+    if (pendingItemIds.has(item.movie_id)) return;
+    setPendingItem(item.movie_id, true);
     setStatus("");
     try {
       await api(`/not-interested/${item.movie_id}`, { method: "DELETE" });
-      setItems(items.filter((candidate) => candidate.movie_id !== item.movie_id));
+      setItems((current) => current.filter((candidate) => candidate.movie_id !== item.movie_id));
       setTotal((current) => (current === null ? current : Math.max(0, current - 1)));
     } catch (error) {
-      setStatus(errorMessage(error));
+      setStatus(`Could not remove not-interested movie: ${errorMessage(error)}`);
+    } finally {
+      setPendingItem(item.movie_id, false);
     }
   }
 
   return (
     <section className="panel">
       <div className="toolbar wide">
-        <input value={filterText} onChange={(event) => setFilterText(event.target.value)} placeholder="Filter" />
-        <StatusText value={status} />
+        <input value={filterText} onChange={(event) => setFilterText(event.target.value)} placeholder="Search" />
+        <StatusBanner value={status} onRetry={isErrorStatus(status) ? () => void loadFirstPage() : undefined} />
       </div>
+      {!loaded && loading && <LoadingMovieGrid />}
       <div className="movie-grid">
         {visibleItems.map((item) => (
           <SharedMovieCard
@@ -737,7 +746,13 @@ function NotInterestedView({ refreshKey, loadPosters }: { refreshKey: number; lo
             loadPoster={loadPosters}
           >
             <div className="button-row">
-              <button className="icon-button" onClick={() => removeNotInterested(item)} aria-label="Remove" title="Remove">
+              <button
+                className="icon-button"
+                onClick={() => removeNotInterested(item)}
+                disabled={pendingItemIds.has(item.movie_id)}
+                aria-label="Remove"
+                title="Remove"
+              >
                 <TrashIcon />
               </button>
             </div>
@@ -749,117 +764,34 @@ function NotInterestedView({ refreshKey, loadPosters }: { refreshKey: number; lo
           {loading ? "Loading" : "Load more"}
         </button>
       )}
-      {loaded && items.length === 0 && <p className="empty">No not-interested movies.</p>}
-      {loaded && items.length > 0 && visibleItems.length === 0 && <p className="empty">No matching not-interested movies.</p>}
+      <div ref={sentinelRef} aria-hidden="true" />
+      {loaded && items.length === 0 && (
+        <EmptyState
+          title="No not-interested movies"
+          description="Movies you dismiss from recommendations will be collected here."
+          actionLabel="Refresh"
+          onAction={() => void loadFirstPage()}
+        />
+      )}
+      {loaded && items.length > 0 && visibleItems.length === 0 && (
+        <EmptyState
+          title="No matching not-interested movies"
+          description="Try a different title, year, director, or cast name."
+          actionLabel="Clear filter"
+          onAction={() => setFilterText("")}
+        />
+      )}
     </section>
   );
-}
 
-function SharedMovieCard({
-  movie,
-  badge,
-  score,
-  sourceLabel,
-  processedStatus,
-  loadPoster = true,
-  children
-}: {
-  movie: RecommendationItem["movie"];
-  badge: string;
-  score?: number;
-  sourceLabel?: string;
-  processedStatus?: string | null;
-  loadPoster?: boolean;
-  children?: React.ReactNode;
-}) {
-  const [posterFailed, setPosterFailed] = useState(false);
-  const [posterLoaded, setPosterLoaded] = useState(false);
-  const directors = useMemo(
-    () => formatPersonNames(movie.directors?.length ? movie.directors : [movie.director]),
-    [movie]
-  );
-  const cast = useMemo(() => formatPersonNames(movie.cast?.length ? movie.cast : movie.main_cast).slice(0, 3).join(", "), [movie]);
-  const statusText = processedStatus ? processingStatusLabel(processedStatus) : null;
-  const showPoster = loadPoster && Boolean(movie.poster_url) && !posterFailed;
-
-  useEffect(() => {
-    setPosterFailed(false);
-    setPosterLoaded(false);
-  }, [movie.poster_url]);
-
-  return (
-    <article className={processedStatus ? "movie-card processed" : "movie-card"}>
-      <div className="card-badge-row">
-        <span>{badge}</span>
-        <span>Douban {movie.douban_rating.toFixed(1)}</span>
-      </div>
-      {showPoster && movie.poster_url ? (
-        <img
-          className={posterLoaded ? "poster-image loaded" : "poster-image loading"}
-          src={movie.poster_url}
-          alt=""
-          loading="lazy"
-          onLoad={() => setPosterLoaded(true)}
-          onError={() => {
-            setPosterLoaded(false);
-            setPosterFailed(true);
-          }}
-        />
-      ) : (
-        <div className={posterFailed ? "poster-placeholder failed" : "poster-placeholder"} aria-hidden="true" />
-      )}
-      <h3>
-        <a href={movie.douban_url} target="_blank" rel="noreferrer">
-          {movie.title}
-        </a>
-      </h3>
-      <p>{[movie.year || null, directors.join(", ")].filter(Boolean).join(" | ")}</p>
-      <p>{cast}</p>
-      <div className="score-source-row">
-        <span>{score === undefined ? "" : `Score: ${score}`}</span>
-        <span>{sourceLabel || ""}</span>
-      </div>
-      {statusText && <p className="processed-label">{statusText}</p>}
-      {children}
-    </article>
-  );
-}
-function StatusText({ value }: { value: string }) {
-  return value ? <span className="status">{value}</span> : null;
-}
-
-async function api<T>(path: string, init?: RequestInit): Promise<T> {
-  await window.moviesDesktop?.waitForBackend();
-  const response = await fetch(apiUrl(path), {
-    ...init,
-    headers: {
-      "Content-Type": "application/json",
-      ...(init?.headers || {})
-    }
-  });
-  const contentType = response.headers.get("content-type") || "";
-  if (!response.ok) {
-    const body = contentType.includes("application/json") ? await response.json().catch(() => ({})) : {};
-    throw new Error(body.detail || `${response.status} ${response.statusText}`);
+  function setPendingItem(itemId: string, pending: boolean) {
+    setPendingItemIds((current) => {
+      const next = new Set(current);
+      if (pending) next.add(itemId);
+      else next.delete(itemId);
+      return next;
+    });
   }
-  if (!contentType.includes("application/json")) {
-    throw new Error(`Expected JSON from ${path}, got ${contentType || "unknown content type"}`);
-  }
-  return response.json() as Promise<T>;
-}
-
-function apiUrl(path: string) {
-  if (/^https?:\/\//.test(path)) return path;
-  const baseUrl = window.moviesDesktop?.apiBaseUrl || import.meta.env.VITE_API_BASE_URL || "";
-  return baseUrl ? `${baseUrl}${path}` : path;
-}
-
-function errorMessage(error: unknown) {
-  return error instanceof Error ? error.message : "Request failed";
-}
-
-function normalizedScore(score: number) {
-  return Math.round((score / BASELINE_HYBRID_TOTAL) * 100);
 }
 
 function recommendationQuery(debugMode: boolean, strategy: RecommendationStrategy) {
@@ -871,86 +803,56 @@ function recommendationQuery(debugMode: boolean, strategy: RecommendationStrateg
   return `?${params.toString()}`;
 }
 
-function processingStatusLabel(status: string) {
+function ThemeIcon({ mode }: { mode: ThemeMode }) {
+  if (mode === "light") return <SunIcon />;
+  if (mode === "dark") return <MoonIcon />;
+  return <GearIcon />;
+}
+
+function LoadingMovieGrid() {
   return (
-    {
-      watched: "Watched",
-      added_to_wishlist: "Added to wishlist",
-      not_interested: "Not interested",
-      maybe_later: "Maybe later"
-    }[status] || status
+    <div className="movie-grid loading-grid" aria-label="Loading movies">
+      {Array.from({ length: 6 }).map((_, index) => (
+        <div className="movie-card skeleton-card" key={index} aria-hidden="true">
+          <div className="skeleton-line short" />
+          <div className="skeleton-poster" />
+          <div className="skeleton-line title" />
+          <div className="skeleton-line" />
+          <div className="skeleton-line medium" />
+        </div>
+      ))}
+    </div>
   );
 }
 
-function movieMatchesFilter(movie: RecommendationItem["movie"], filterText: string) {
-  const query = filterText.trim().toLocaleLowerCase();
-  if (!query) return true;
-  return movieFilterText(movie).includes(query);
-}
-
-function movieFilterText(movie: RecommendationItem["movie"]) {
-  return [
-    movie.title,
-    movie.year,
-    movie.director,
-    ...(movie.directors || []),
-    ...(movie.main_cast || []),
-    ...(movie.cast || [])
-  ]
-    .filter(Boolean)
-    .join(" ")
-    .toLocaleLowerCase();
-}
-
-function formatPersonNames(values: Array<string | null | undefined>) {
-  return values.map((value) => formatPersonName(value)).filter(Boolean);
-}
-
-function formatPersonName(value: string | null | undefined) {
-  const text = (value || "").trim();
-  const match = text.match(/[a-zA-Z]/);
-  if (!match || match.index === undefined) return text;
-
-  const localPart = text.slice(0, match.index).trim();
-  const foreignPart = text.slice(match.index).trim();
-  if (!localPart) return foreignPart;
-  if (hasMiddleDot(localPart)) return foreignPart || localPart;
-  if (!/[\u3400-\u9fff\u3040-\u30ff\uac00-\ud7af]/.test(localPart)) return foreignPart || localPart;
-  return localPart;
-}
-
-function hasMiddleDot(value: string) {
-  return ["·", "・", "•", ".", "┞"].some((marker) => value.includes(marker));
-}
-
-function TrashIcon() {
+function EmptyState({
+  title,
+  description,
+  actionLabel,
+  onAction
+}: {
+  title: string;
+  description: string;
+  actionLabel: string;
+  onAction: () => void;
+}) {
   return (
-    <svg className="button-icon" viewBox="0 0 24 24" aria-hidden="true">
-      <path d="M3 6h18" />
-      <path d="M8 6V4h8v2" />
-      <path d="M19 6l-1 14H6L5 6" />
-      <path d="M10 11v5" />
-      <path d="M14 11v5" />
-    </svg>
+    <div className="empty-state">
+      <h2>{title}</h2>
+      <p>{description}</p>
+      <button type="button" onClick={onAction}>
+        {actionLabel}
+      </button>
+    </div>
   );
-}
-
-function searchCandidateFromMovie(movie: RecommendationItem["movie"]): SearchCandidate {
-  return {
-    subject_id: subjectIdFromDoubanUrl(movie.douban_url) || movie.id,
-    title: movie.title,
-    year: movie.year,
-    director: movie.director,
-    url: movie.douban_url
-  };
-}
-
-function subjectIdFromDoubanUrl(url: string) {
-  return url.match(/\/subject\/([^/]+)\//)?.[1] || null;
 }
 
 function selectedQuality(form: RecordForm) {
   return form.quality === "Other" ? form.custom_quality.trim() : form.quality;
+}
+
+function recordCandidateMeta(candidate: SearchCandidate) {
+  return [candidate.year, candidate.director].filter(Boolean).join(" · ") || candidate.subject_id;
 }
 
 function sheetFromWatchedDate(watchedDate: string) {

@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, session } = require("electron");
+const { app, BrowserWindow, ipcMain, session, shell } = require("electron");
 const { spawn } = require("child_process");
 const http = require("http");
 const path = require("path");
@@ -138,12 +138,25 @@ function waitForHttp(url, timeoutMs = 30000) {
   });
 }
 
+function isExternalNavigationUrl(url) {
+  if (!/^https?:\/\//.test(url)) return false;
+  return !url.startsWith(FRONTEND_DEV_URL) && !url.startsWith(BACKEND_URL);
+}
+
+function openExternalUrl(url) {
+  if (!isExternalNavigationUrl(url)) return false;
+  shell.openExternal(url);
+  return true;
+}
+
 async function createWindow() {
   mainWindow = new BrowserWindow({
     width: 1280,
     height: 860,
     minWidth: 980,
     minHeight: 680,
+    resizable: false,
+    maximizable: false,
     title: "Personal Movie Recommender",
     backgroundColor: "#f7f7f4",
     webPreferences: {
@@ -155,6 +168,15 @@ async function createWindow() {
 
   mainWindow.webContents.on("did-fail-load", (_event, errorCode, errorDescription, validatedURL) => {
     log(`Window failed to load ${validatedURL}: ${errorCode} ${errorDescription}`);
+  });
+
+  mainWindow.webContents.setWindowOpenHandler(({ url }) => {
+    if (openExternalUrl(url)) return { action: "deny" };
+    return { action: "allow" };
+  });
+
+  mainWindow.webContents.on("will-navigate", (event, url) => {
+    if (openExternalUrl(url)) event.preventDefault();
   });
 
   if (fs.existsSync(frontendDistIndex)) {
