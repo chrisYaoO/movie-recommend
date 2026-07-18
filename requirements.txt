@@ -1,5 +1,5 @@
 fastapi
-google-auth
+google-auth[requests]
 openpyxl
 psycopg[binary]
 selenium
