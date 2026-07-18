@@ -3,6 +3,7 @@
 from html import unescape
 import json
 import re
+import sys
 from threading import RLock
 import time
 from typing import Protocol
@@ -13,7 +14,19 @@ from selenium.common.exceptions import TimeoutException
 from backend.app.models.domain import DoubanMovieDetail
 
 
-DEFAULT_CHROME_BINARY_PATH = r"C:\Program Files\Google\Chrome\Application\chrome.exe"
+WINDOWS_CHROME_BINARY_PATH = r"C:\Program Files\Google\Chrome\Application\chrome.exe"
+MACOS_CHROME_BINARY_PATH = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+
+
+def default_chrome_binary_path(platform: str = sys.platform) -> str | None:
+    if platform == "win32":
+        return WINDOWS_CHROME_BINARY_PATH
+    if platform == "darwin":
+        return MACOS_CHROME_BINARY_PATH
+    return None
+
+
+DEFAULT_CHROME_BINARY_PATH = default_chrome_binary_path()
 
 
 class DoubanDetailAdapter(Protocol):

@@ -6,6 +6,9 @@ from selenium.common.exceptions import TimeoutException
 from backend.app.services.metadata_service import (
     DoubanHttpDetailAdapter,
     DoubanSeleniumDetailAdapter,
+    MACOS_CHROME_BINARY_PATH,
+    WINDOWS_CHROME_BINARY_PATH,
+    default_chrome_binary_path,
     parse_douban_movie_detail,
 )
 
@@ -42,6 +45,11 @@ class _FakeWebDriver:
 
 
 class MetadataServiceTest(unittest.TestCase):
+    def test_default_chrome_binary_path_is_platform_aware(self) -> None:
+        self.assertEqual(WINDOWS_CHROME_BINARY_PATH, default_chrome_binary_path("win32"))
+        self.assertEqual(MACOS_CHROME_BINARY_PATH, default_chrome_binary_path("darwin"))
+        self.assertIsNone(default_chrome_binary_path("linux"))
+
     def test_parse_douban_movie_detail_extracts_core_metadata(self) -> None:
         html = """
         <html>

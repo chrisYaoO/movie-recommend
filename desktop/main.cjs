@@ -5,6 +5,7 @@ const path = require("path");
 const fs = require("fs");
 const { ensureBackend } = require("./backend-lifecycle.cjs");
 const { posterRequestHeaders } = require("./poster-request-policy.cjs");
+const { virtualenvPythonPath } = require("./runtime-paths.cjs");
 
 const BACKEND_HOST = "127.0.0.1";
 const BACKEND_PORT = Number(process.env.MOVIES_BACKEND_PORT || 8000);
@@ -15,7 +16,7 @@ const FRONTEND_DEV_URL = `http://${BACKEND_HOST}:${FRONTEND_PORT}`;
 const repoRoot = path.resolve(__dirname, "..");
 const frontendRoot = path.join(repoRoot, "frontend");
 const frontendDistIndex = path.join(frontendRoot, "dist", "index.html");
-const pythonPath = path.join(repoRoot, ".venv", "Scripts", "python.exe");
+const pythonPath = virtualenvPythonPath(repoRoot);
 const runtimeLogPath = path.join(__dirname, "runtime.log");
 
 let backendProcess = null;
