@@ -1,16 +1,22 @@
+from dataclasses import asdict
 import os
 from threading import Lock
 
 from fastapi import APIRouter, HTTPException, Query
 
+from backend.app.config import resolve_postgres_dsn, resolve_service_account_file, resolve_spreadsheet_id
 from backend.app.db.postgres_repository import PostgresViewingHistoryRepository
-from backend.app.services.google_sheets_service import GoogleSheetsValuesAppendService
+from backend.app.services.google_sheets_service import GoogleSheetsHistoryService
+from backend.app.services.candidate_queue_service import CandidateQueueService
 from backend.app.services.movie_search_service import create_movie_search_service
 from backend.app.services.metadata_service import DEFAULT_CHROME_BINARY_PATH, DoubanSeleniumDetailAdapter
 from backend.app.services.recommendation_service import FeedbackRequest, RecordWatchedRequest, service
 from backend.app.services.viewing_history_record_service import RecordViewingHistoryRequest, ViewingHistoryRecordService
-from jobs.import_auto_matched_history import resolve_postgres_dsn
-from jobs.sync_google_sheets_history import resolve_service_account_file, resolve_spreadsheet_id
+from backend.app.services.viewing_history_management_service import (
+    EditViewingHistoryRequest,
+    ViewingHistoryManagementService,
+)
+from backend.app.services.viewing_history_sync_service import ViewingHistorySyncService
 
 router = APIRouter()
 movie_search_service = create_movie_search_service()
@@ -23,6 +29,12 @@ PREWARM_RECORD_SELENIUM_ENV = "MOVIES_PREWARM_RECORD_SELENIUM"
 def create_record_detail_adapter():
     chrome_binary_path = os.getenv(RECORD_CHROME_BINARY_ENV, DEFAULT_CHROME_BINARY_PATH)
     return DoubanSeleniumDetailAdapter(chrome_binary_path=chrome_binary_path)
+
+
+candidate_queue_service = CandidateQueueService(
+    repository_factory=lambda: PostgresViewingHistoryRepository(resolve_postgres_dsn(None, ".env")),
+    detail_adapter_factory=create_record_detail_adapter,
+)
 
 
 def get_viewing_history_record_service() -> ViewingHistoryRecordService:
@@ -38,15 +50,25 @@ def get_viewing_history_record_service() -> ViewingHistoryRecordService:
                 raise RuntimeError("Google Sheets spreadsheet id and service account file are required")
             repository = PostgresViewingHistoryRepository(resolve_postgres_dsn(None, config_path))
             repository.initialize_schema()
+            sheets = GoogleSheetsHistoryService(
+                spreadsheet_id=spreadsheet_id,
+                service_account_file=service_account_file,
+            )
             viewing_history_record_service = ViewingHistoryRecordService(
                 repository=repository,
                 detail_adapter=create_record_detail_adapter(),
-                sheets=GoogleSheetsValuesAppendService(
-                    spreadsheet_id=spreadsheet_id,
-                    service_account_file=service_account_file,
-                ),
+                syncer=ViewingHistorySyncService(repository, sheets),
             )
     return viewing_history_record_service
+
+
+def get_viewing_history_management_service() -> ViewingHistoryManagementService:
+    record_service = get_viewing_history_record_service()
+    return ViewingHistoryManagementService(
+        record_service.repository,
+        record_service.syncer,
+        service.restore_candidate_pool_movie_if_eligible,
+    )
 
 
 def should_prewarm_record_selenium() -> bool:
@@ -60,6 +82,15 @@ def prewarm_viewing_history_record_service() -> None:
     get_viewing_history_record_service().detail_adapter.prewarm()
 
 
+def sync_pending_viewing_history() -> None:
+    get_viewing_history_record_service().syncer.sync_pending()
+
+
+def stop_viewing_history_sync() -> None:
+    if viewing_history_record_service is not None:
+        viewing_history_record_service.syncer.stop()
+
+
 def close_viewing_history_record_service() -> None:
     global viewing_history_record_service
     with viewing_history_record_service_lock:
@@ -69,6 +100,26 @@ def close_viewing_history_record_service() -> None:
         return
     record_service.detail_adapter.close()
     record_service.repository.close()
+
+
+def close_candidate_queue_service() -> None:
+    candidate_queue_service.stop()
+
+
+@router.get("/candidate-queue/status")
+def get_candidate_queue_status():
+    try:
+        return asdict(candidate_queue_service.status())
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"candidate queue status failed: {exc}") from exc
+
+
+@router.post("/candidate-queue/process", status_code=202)
+def start_candidate_queue_processing():
+    try:
+        return asdict(candidate_queue_service.start())
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"candidate queue processing failed to start: {exc}") from exc
 
 
 @router.get("/movies/search")
@@ -87,7 +138,17 @@ def record_viewing_history(request: RecordViewingHistoryRequest):
     try:
         record_service = get_viewing_history_record_service()
         result = record_service.record(request)
-        processed_item = None
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"record viewing history failed: {exc}") from exc
+
+    processed_item = None
+    watched_wishlist_item = None
+    warnings: list[str] = []
+    try:
         if result.movie_id:
             service.mark_watched_movie(result.movie_id)
         if request.session_id and request.recommendation_item_id:
@@ -96,16 +157,13 @@ def record_viewing_history(request: RecordViewingHistoryRequest):
                 request.recommendation_item_id,
                 result.movie_id,
             )
-        watched_wishlist_item = None
         if request.wishlist_id:
             watched_wishlist_item = service.mark_wishlist_item_watched_from_record(request.wishlist_id, result.movie_id)
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    except KeyError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
     except Exception as exc:
-        raise HTTPException(status_code=502, detail=f"record viewing history failed: {exc}") from exc
+        warnings.append(f"history saved, but related recommendation state was not updated: {exc}")
     response = record_service.to_response(result)
+    if warnings:
+        response["warnings"] = warnings
     if request.session_id and request.recommendation_item_id:
         response["session_id"] = request.session_id
         response["recommendation_item_id"] = request.recommendation_item_id
@@ -115,6 +173,47 @@ def record_viewing_history(request: RecordViewingHistoryRequest):
         response["wishlist_id"] = request.wishlist_id
         response["wishlist_status"] = watched_wishlist_item.status.value if watched_wishlist_item else None
     return response
+
+
+@router.get("/viewing-history")
+def list_viewing_history(
+    limit: int = Query(default=50, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
+    year: int | None = Query(default=None, ge=1900, le=2100),
+    order: str = Query(default="desc", pattern="^(asc|desc)$"),
+):
+    return get_viewing_history_management_service().list(limit, offset, year, order == "desc")
+
+
+@router.patch("/viewing-history/{history_id}")
+def edit_viewing_history(history_id: str, request: EditViewingHistoryRequest):
+    try:
+        return get_viewing_history_management_service().edit(history_id, request)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.delete("/viewing-history/{history_id}")
+def delete_viewing_history(history_id: str):
+    try:
+        return get_viewing_history_management_service().delete(history_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.post("/viewing-history/{history_id}/sync")
+def retry_viewing_history_sync(history_id: str):
+    try:
+        return get_viewing_history_management_service().retry(history_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.get("/viewing-history-sync/status")
+def viewing_history_sync_status():
+    return get_viewing_history_management_service().sync_health()
 
 
 @router.get("/recommendations")
@@ -172,13 +271,21 @@ def get_wishlist(limit: int = Query(default=10, ge=1, le=50), offset: int = Quer
 
 @router.post("/wishlist/{wishlist_id}/watched")
 def record_watched(wishlist_id: str, request: RecordWatchedRequest):
-    try:
-        history = service.record_watched(wishlist_id, request)
-    except KeyError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return service.to_viewing_history_response(history)
+    wishlist_item = service.repository.find_wishlist_item(wishlist_id)
+    if wishlist_item is None:
+        raise HTTPException(status_code=404, detail="wishlist item not found")
+    subject_id = wishlist_item.movie.douban_url.rstrip("/").rsplit("/", 1)[-1]
+    return record_viewing_history(
+        RecordViewingHistoryRequest(
+            douban_subject_id=subject_id,
+            watched_date=request.watched_date,
+            rating=request.user_rating,
+            quality=request.quality,
+            comment=request.comment,
+            sheet=str(request.watched_date.year),
+            wishlist_id=wishlist_id,
+        )
+    )
 
 
 @router.delete("/wishlist/{wishlist_id}")

@@ -4,27 +4,21 @@ import argparse
 from dataclasses import asdict, dataclass
 import json
 import sys
-from typing import Callable, Protocol
+from typing import Callable
 
+from backend.app.config import resolve_postgres_dsn
 from backend.app.db.postgres_repository import PostgresViewingHistoryRepository
 from backend.app.db.repository import ViewingHistoryRepository
 from backend.app.models.domain import DoubanMovieDetail
 from backend.app.services.metadata_service import (
     DEFAULT_CHROME_BINARY_PATH,
+    DoubanDetailAdapter,
     DoubanHttpDetailAdapter,
     DoubanSeleniumDetailAdapter,
 )
 from jobs.candidate_pool import DOUBAN_RECOMMENDATION_SOURCE, parse_recommended_subject_ids
-from jobs.import_auto_matched_history import resolve_postgres_dsn
 
 StatusWriter = Callable[[str], None]
-
-
-class DoubanPageDetailAdapter(Protocol):
-    def fetch(self, subject_id: str) -> DoubanMovieDetail: ...
-
-    @property
-    def last_page_source(self) -> str | None: ...
 
 
 @dataclass(frozen=True)
@@ -41,7 +35,7 @@ class HistoryMovieRebuildSummary:
 
 def rebuild_movies_from_viewing_history(
     repository: ViewingHistoryRepository,
-    detail_adapter: DoubanPageDetailAdapter,
+    detail_adapter: DoubanDetailAdapter,
     limit: int | None = None,
     dry_run: bool = False,
     status_writer: StatusWriter | None = None,

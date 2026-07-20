@@ -14,7 +14,8 @@ Implemented workflows:
 - record want-to-watch, maybe-later, and not-interested feedback
 - manage wishlist and not-interested state
 - search for a movie and record it as watched
-- append watched records to Google Sheets before persisting local state
+- browse, edit, and remove viewing-history records
+- persist watched records locally and synchronize them to Google Sheets
 - synchronously create missing canonical watched movies
 - build and enrich a resumable local recommendation candidate pool
 - run the same UI in a browser during development or in an Electron desktop window
@@ -255,6 +256,8 @@ To retry failed queue rows, run:
 .\.venv\Scripts\python.exe -m jobs.candidate_pool process-queue --retry-failed --limit 25
 ```
 
+The application header shows a `Process queue (N)` button whose count includes both pending and failed rows. It processes both statuses in database queue order on a background thread and closes its dedicated Selenium driver when processing ends. Processing stops on the first failed item and cannot be restarted until the app is reopened. Debug mode adds a compact details card with the current subject and failure reason.
+
 The queue is resumable through PostgreSQL statuses. `movies` stores canonical metadata only; watched, wishlist, feedback, and candidate eligibility remain in separate tables.
 
 ## Run The API
@@ -278,6 +281,10 @@ Useful endpoints in the current slice:
 
 - `GET /movies/search?q=Still%20Walking`
 - `POST /viewing-history`
+- `GET /viewing-history?year=2026&limit=50&offset=0&order=desc`
+- `PATCH /viewing-history/{history_id}`
+- `DELETE /viewing-history/{history_id}`
+- `POST /viewing-history/{history_id}/sync`
 - `GET /recommendations?strategy=hybrid`
 - `GET /recommendations?strategy=hybrid&seed=42`
 - `GET /recommendations?strategy=popularity`
@@ -303,7 +310,9 @@ To record a watched movie selected from search:
 }
 ```
 
-The API appends the row to Google Sheets first, then writes `viewing_history` with `source_sheet_name=<sheet>`, the appended sheet row number, and `douban_subject_id`. If `movies` already has that subject, `movie_id` is filled immediately. If not, the request synchronously fetches the watched movie detail, writes `movies`, and fills `viewing_history.movie_id`. Detail-page recommendations are inserted into `candidate_subject_queue`; recommended candidates are later enriched and activated by `jobs.candidate_pool process-queue`.
+The API commits `viewing_history` and its Sheet-sync outbox task locally, then attempts an immediate Google Sheets flush. A Sheet failure leaves the local history record saved and the pending task retryable. If `movies` already has the selected subject, `movie_id` is filled immediately. If not, the request synchronously fetches the watched movie detail, writes `movies`, and fills `viewing_history.movie_id`. Detail-page recommendations are inserted into `candidate_subject_queue`; recommended candidates are later enriched and activated by `jobs.candidate_pool process-queue`.
+
+Deleting a managed viewing-history record soft-deletes it in PostgreSQL and removes its Google Sheets projection. Its existing candidate-pool row is reactivated only if the movie has no other active viewing-history record and no active wishlist entry. A current effective `not_interested` state still excludes the movie from recommendations.
 
 ## Run The Frontend
 

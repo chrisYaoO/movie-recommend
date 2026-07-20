@@ -7,6 +7,7 @@ import backend.app.api.routes as routes
 from backend.app.api.routes import (
     clear_not_interested,
     close_viewing_history_record_service,
+    get_candidate_queue_status,
     get_not_interested,
     get_recommendations,
     get_recommendation_session,
@@ -16,15 +17,36 @@ from backend.app.api.routes import (
     remove_from_wishlist,
     search_movies,
     should_prewarm_record_selenium,
+    start_candidate_queue_processing,
     undo_recommendation_item_processing,
 )
 from backend.app.models.domain import RecommendationProcessingStatus, WishlistStatus
+from backend.app.services.candidate_queue_service import CandidateQueueStatus
 from backend.app.services.metadata_service import DoubanSeleniumDetailAdapter
 from backend.app.services.movie_search_service import MovieSearchCandidate
 from backend.app.services.viewing_history_record_service import RecordViewingHistoryRequest, RecordViewingHistoryResult
 
 
 class ApiRoutesTest(unittest.TestCase):
+    def test_candidate_queue_status_uses_queue_service(self) -> None:
+        fake_service = _FakeCandidateQueueService()
+
+        with patch("backend.app.api.routes.candidate_queue_service", fake_service):
+            response = get_candidate_queue_status()
+
+        self.assertEqual(4, response["pending_count"])
+        self.assertFalse(response["processing"])
+        self.assertEqual(1, fake_service.status_calls)
+
+    def test_start_candidate_queue_processing_is_idempotent_at_the_route(self) -> None:
+        fake_service = _FakeCandidateQueueService()
+
+        with patch("backend.app.api.routes.candidate_queue_service", fake_service):
+            response = start_candidate_queue_processing()
+
+        self.assertTrue(response["processing"])
+        self.assertEqual(1, fake_service.start_calls)
+
     def test_record_detail_adapter_uses_selenium(self) -> None:
         with patch.dict("os.environ", {}, clear=True):
             adapter = routes.create_record_detail_adapter()
@@ -258,6 +280,42 @@ class _FakeMovieSearchService:
                 for candidate in candidates
             ],
         }
+
+
+class _FakeCandidateQueueService:
+    def __init__(self):
+        self.status_calls = 0
+        self.start_calls = 0
+
+    def status(self):
+        self.status_calls += 1
+        return CandidateQueueStatus(
+            pending_count=4,
+            failed_count=1,
+            processing=False,
+            processed_count=0,
+            current_subject_id=None,
+            current_source_label=None,
+            current_source_ref=None,
+            blocked_for_run=False,
+            failure_reason=None,
+            last_error=None,
+        )
+
+    def start(self):
+        self.start_calls += 1
+        return CandidateQueueStatus(
+            pending_count=4,
+            failed_count=1,
+            processing=True,
+            processed_count=0,
+            current_subject_id="subject-1",
+            current_source_label="recommended from Source",
+            current_source_ref="recommended_from:source",
+            blocked_for_run=False,
+            failure_reason=None,
+            last_error=None,
+        )
 
 
 class _FakeRecordService:

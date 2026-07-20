@@ -28,8 +28,16 @@ class _FakeHttpResponse:
 
 
 class _FakeWebDriver:
-    def __init__(self, page_source: str) -> None:
+    def __init__(
+        self,
+        page_source: str,
+        get_error: Exception | None = None,
+        current_url_on_error: str | None = None,
+    ) -> None:
         self.page_source = page_source
+        self.get_error = get_error
+        self.current_url_on_error = current_url_on_error
+        self.current_url = ""
         self.urls: list[str] = []
         self.page_load_timeout: float | None = None
         self.quit_count = 0
@@ -39,6 +47,10 @@ class _FakeWebDriver:
 
     def get(self, url: str) -> None:
         self.urls.append(url)
+        if self.get_error is not None:
+            self.current_url = self.current_url_on_error or ""
+            raise self.get_error
+        self.current_url = url
 
     def quit(self) -> None:
         self.quit_count += 1
@@ -125,6 +137,20 @@ class MetadataServiceTest(unittest.TestCase):
         self.assertEqual("A family gathers for a day.", detail.summary)
         self.assertEqual("https://img.example/p123456.webp", detail.poster_url)
         self.assertEqual("https://movie.douban.com/subject/2222996/", detail.url)
+
+    def test_parse_douban_movie_detail_extracts_poster_when_src_precedes_rel(self) -> None:
+        html = """
+        <html>
+          <body>
+            <span property="v:itemreviewed">Clarkson's Farm</span>
+            <img src="https://img.example/p2933231160.webp" rel="v:image">
+          </body>
+        </html>
+        """
+
+        detail = parse_douban_movie_detail("37303191", html)
+
+        self.assertEqual("https://img.example/p2933231160.webp", detail.poster_url)
 
     def test_parse_douban_movie_detail_extracts_bilingual_title_fields(self) -> None:
         html = """
@@ -276,6 +302,72 @@ class MetadataServiceTest(unittest.TestCase):
 
         self.assertEqual("No Json LD Movie", detail.title)
         self.assertEqual(2021, detail.year)
+
+    def test_selenium_detail_adapter_parses_loaded_page_after_renderer_timeout(self) -> None:
+        html = """
+        <html>
+          <head><script type="application/ld+json">{"name":"Loaded Before Timeout","datePublished":"2026"}</script></head>
+        </html>
+        """
+        driver = _FakeWebDriver(
+            html,
+            get_error=TimeoutException("Timed out receiving message from renderer"),
+            current_url_on_error="https://movie.douban.com/subject/37105301/",
+        )
+
+        with DoubanSeleniumDetailAdapter(
+            timeout_seconds=20,
+            delay_seconds=0,
+            driver_factory=lambda: driver,
+            wait_for_json_ld=False,
+        ) as adapter:
+            detail = adapter.fetch("37105301")
+            self.assertEqual(1, driver.quit_count)
+
+        self.assertEqual("Loaded Before Timeout", detail.title)
+        self.assertEqual("37105301", detail.subject_id)
+
+    def test_selenium_detail_adapter_rejects_stale_page_after_renderer_timeout(self) -> None:
+        html = '<span property="v:itemreviewed">Previous Movie</span>'
+        driver = _FakeWebDriver(
+            html,
+            get_error=TimeoutException("Timed out receiving message from renderer"),
+            current_url_on_error="https://movie.douban.com/subject/previous/",
+        )
+
+        with DoubanSeleniumDetailAdapter(
+            timeout_seconds=20,
+            delay_seconds=0,
+            driver_factory=lambda: driver,
+            wait_for_json_ld=False,
+        ) as adapter:
+            with self.assertRaisesRegex(TimeoutError, "subject 37105301"):
+                adapter.fetch("37105301")
+
+    def test_selenium_detail_adapter_shortens_renderer_timeout_when_page_is_unusable(self) -> None:
+        driver = _FakeWebDriver(
+            "<html><head><title>豆瓣</title></head></html>",
+            get_error=TimeoutException("Timed out receiving message from renderer\nStacktrace: lots of native frames"),
+            current_url_on_error="https://movie.douban.com/subject/37105301/",
+        )
+
+        with DoubanSeleniumDetailAdapter(
+            timeout_seconds=20,
+            delay_seconds=0,
+            driver_factory=lambda: driver,
+            wait_for_json_ld=False,
+        ) as adapter:
+            with self.assertRaises(TimeoutError) as caught:
+                adapter.fetch("37105301")
+
+        self.assertEqual("Chrome timed out loading Douban subject 37105301 after 20s", str(caught.exception))
+
+    def test_selenium_detail_adapter_uses_eager_page_load_strategy(self) -> None:
+        with patch("selenium.webdriver.Chrome") as chrome:
+            DoubanSeleniumDetailAdapter()._create_driver()
+
+        options = chrome.call_args.kwargs["options"]
+        self.assertEqual("eager", options.page_load_strategy)
 
     def test_detail_adapters_reject_generic_douban_title_without_movie_metadata(self) -> None:
         html = "<html><head><title>豆瓣</title></head><body></body></html>"

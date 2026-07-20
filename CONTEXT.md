@@ -96,7 +96,7 @@ The user's ratings usually range from 3.5 to 5 and should be interpreted as pers
 
 ### Viewing History Source
 
-The user's historical viewing record is maintained in Google Sheets. Local Excel files are historical snapshots only and should be ignored for the next rebuild unless the user explicitly asks to use them.
+PostgreSQL is authoritative for viewing history. Google Sheets is a one-way synchronized projection used for the user's review workflow. Historical local Excel files remain snapshots only.
 
 Current Excel columns:
 
@@ -110,7 +110,9 @@ Current Excel columns:
 
 `Name` and `Rating` are sufficient for minimal import. `Director` and `Year` help disambiguate movie identity during matching.
 
-The stable source identity for a viewing-history row should be `source_sheet_name + source_row_number`. This identity should replace the previous source-row hash as the uniqueness contract for `viewing_history`. A row-content checksum can still be kept as an optional change-detection checksum, but it should not be the primary unique row identity.
+`viewing_history.id` is the permanent record identity. `source_sheet_name + source_row_number` is only a mutable cached locator, and `source_row_checksum` verifies the projected A:I content. Synchronized Sheet rows carry the same UUID in the hidden J-column header `RecordId`.
+
+Runtime synchronization is PostgreSQL to Google Sheets only. Direct edits to managed Sheet rows are unsupported and may be overwritten by the app. Historical Sheet-only exclusions without a `RecordId` remain unmanaged.
 
 The rebuild path is intentionally split. Google Sheets plus the confirmed progress JSON first rebuilds `viewing_history` only, storing `douban_subject_id` directly on each watched row. It must not fetch Douban detail pages during this step. `viewing_history.movie_id` is nullable and should be treated as a backfilled local cache after `movies` rows exist.
 
@@ -184,7 +186,11 @@ When replaying the progress JSON, confirmed subject IDs should be selected by ex
 
 After `viewing_history` is rebuilt, the movie rebuild job should read distinct `viewing_history.douban_subject_id` values that are missing from `movies`, fetch Douban detail pages, upsert canonical metadata into `movies`, backfill `viewing_history.movie_id`, and enqueue one-layer Douban recommendations into `candidate_subject_queue`.
 
-For incremental record-watched updates, the request should append to Google Sheets and upsert `viewing_history`. If `movies` already contains the watched subject, `movie_id` can be filled immediately. If not, the request should synchronously fetch that watched movie's Douban detail, write `movies`, and fill `viewing_history.movie_id`. Detail-page recommendations may be inserted into `candidate_subject_queue`, but recommended subjects should be turned into `movies` plus `candidate_pool` entries by the background queue processor, not by the synchronous record-watched request.
+For incremental record-watched updates, the request commits `viewing_history` and a replacing `sheet_sync_outbox` task in one local transaction. It may then attempt an immediate Sheet flush, but Sheet failure does not roll back local success. Pending writes retry after backend startup. Edits and soft deletes use the same outbox path, and the watched year selects the corresponding year-named Sheet tab.
+
+Deleting a viewing-history event removes that event from active history and its managed Google Sheets projection. If the movie has no other active viewing-history event and no active wishlist entry, any existing candidate-pool row is reactivated. Current effective `not_interested` feedback remains a separate recommendation exclusion even when the candidate-pool row is active.
+
+If `movies` already contains the watched subject, `movie_id` can be filled immediately. If not, the request synchronously fetches that watched movie's Douban detail before the local history transaction. Detail-page recommendations may be inserted into `candidate_subject_queue`, but recommended subjects become `movies` plus `candidate_pool` entries through the background queue processor.
 
 ## Recommendation Strategy
 

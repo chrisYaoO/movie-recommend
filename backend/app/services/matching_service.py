@@ -1,7 +1,6 @@
 ﻿from __future__ import annotations
 
 from dataclasses import dataclass
-from dataclasses import replace
 import hashlib
 from html import unescape
 import json
@@ -193,69 +192,6 @@ class CachedDoubanSearchAdapter:
         if results or self.cache_empty_results:
             self.cache.set(match_input, results)
         return results
-
-
-class InMemoryDoubanMatchRepository:
-    def __init__(self) -> None:
-        self.candidates_by_raw_id: dict[str, DoubanMatchCandidate] = {}
-
-    def save_all(self, candidates: list[DoubanMatchCandidate]) -> list[DoubanMatchCandidate]:
-        for candidate in candidates:
-            self.candidates_by_raw_id[candidate.source_raw_id] = candidate
-        return candidates
-
-    def all(self) -> list[DoubanMatchCandidate]:
-        return list(self.candidates_by_raw_id.values())
-
-    def find_by_status(self, status: DoubanMatchStatus) -> list[DoubanMatchCandidate]:
-        return [candidate for candidate in self.all() if candidate.status == status]
-
-    def find_needs_review(self) -> list[DoubanMatchCandidate]:
-        return self.find_by_status(DoubanMatchStatus.NEEDS_REVIEW)
-
-    def find_confirmed(self) -> list[DoubanMatchCandidate]:
-        return self.find_by_status(DoubanMatchStatus.CONFIRMED)
-
-    def confirm_match(self, source_raw_id: str) -> DoubanMatchCandidate:
-        candidate = self._get_existing(source_raw_id)
-        if candidate.candidate_subject_id is None:
-            raise ValueError("match candidate has no subject id to confirm")
-
-        confirmed = replace(
-            candidate,
-            status=DoubanMatchStatus.CONFIRMED,
-            match_reasons=(*candidate.match_reasons, "human_confirmed"),
-        )
-        self.candidates_by_raw_id[source_raw_id] = confirmed
-        return confirmed
-
-    def set_manual_subject_id(
-        self,
-        source_raw_id: str,
-        subject_id: str,
-        title: str | None = None,
-        year: int | None = None,
-        director: str | None = None,
-    ) -> DoubanMatchCandidate:
-        candidate = self._get_existing(source_raw_id)
-        confirmed = replace(
-            candidate,
-            status=DoubanMatchStatus.CONFIRMED,
-            match_score=1.0,
-            match_reasons=("manual_subject_id",),
-            candidate_subject_id=subject_id,
-            candidate_title=title or candidate.candidate_title or candidate.query_title,
-            candidate_year=year if year is not None else candidate.candidate_year,
-            candidate_director=director if director is not None else candidate.candidate_director,
-        )
-        self.candidates_by_raw_id[source_raw_id] = confirmed
-        return confirmed
-
-    def _get_existing(self, source_raw_id: str) -> DoubanMatchCandidate:
-        candidate = self.candidates_by_raw_id.get(source_raw_id)
-        if candidate is None:
-            raise KeyError("match candidate not found")
-        return candidate
 
 
 def build_douban_match_inputs(candidates: list[ViewingHistoryCandidate]) -> MatchQueuePreview:

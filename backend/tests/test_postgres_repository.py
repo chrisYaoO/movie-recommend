@@ -31,7 +31,12 @@ class PostgresViewingHistoryRepositoryTest(unittest.TestCase):
                 _detail(rating=8.9),
             )
             second = repository.persist_confirmed_viewing_history(
-                _confirmed(source_row_checksum="checksum-1", rating=4.5, comment="updated"),
+                _confirmed(
+                    source_row_checksum="checksum-1",
+                    rating=4.5,
+                    comment="updated",
+                    history_id=first.history.id,
+                ),
                 _detail(rating=9.0),
             )
 
@@ -41,6 +46,8 @@ class PostgresViewingHistoryRepositoryTest(unittest.TestCase):
             ]
             movie = repository.connection.execute("SELECT * FROM movies").fetchone()
             history = repository.connection.execute("SELECT * FROM viewing_history").fetchone()
+            active_history = repository.find_active_viewing_history()
+            active_count = repository.count_active_viewing_history()
 
         self.assertEqual(first.movie.id, second.movie.id)
         self.assertEqual(first.history.id, second.history.id)
@@ -52,6 +59,8 @@ class PostgresViewingHistoryRepositoryTest(unittest.TestCase):
         self.assertEqual(4.5, float(history["user_rating"]))
         self.assertEqual("1291992", history["douban_subject_id"])
         self.assertEqual("updated", history["comment"])
+        self.assertEqual(1, active_count)
+        self.assertEqual(first.history.id, active_history[0].id)
         self.assertNotIn("display_title", movie.keys())
         self.assertNotIn("original_title", movie.keys())
 
@@ -66,7 +75,12 @@ class PostgresViewingHistoryRepositoryTest(unittest.TestCase):
                 _detail(rating=8.9),
             )
             second = repository.persist_confirmed_viewing_history(
-                _confirmed(source_row_checksum="checksum-after", rating=4.5, comment="updated"),
+                _confirmed(
+                    source_row_checksum="checksum-after",
+                    rating=4.5,
+                    comment="updated",
+                    history_id=first.history.id,
+                ),
                 _detail(rating=9.0),
             )
 
@@ -102,6 +116,7 @@ def _reset_schema(repository: PostgresViewingHistoryRepository) -> None:
     repository.connection.execute("DROP TABLE IF EXISTS recommendation_sessions")
     repository.connection.execute("DROP TABLE IF EXISTS candidate_pool")
     repository.connection.execute("DROP TABLE IF EXISTS candidate_subject_queue")
+    repository.connection.execute("DROP TABLE IF EXISTS sheet_sync_outbox")
     repository.connection.execute("DROP TABLE IF EXISTS viewing_history")
     repository.connection.execute("DROP TABLE IF EXISTS movies")
 
@@ -111,6 +126,7 @@ def _confirmed(
     source_row_checksum: str | None = "checksum-1",
     rating: float = 4.2,
     comment: str = "test comment",
+    history_id: str | None = None,
 ) -> ConfirmedViewingHistoryInput:
     return ConfirmedViewingHistoryInput(
         source_raw_id="raw-1",
@@ -122,6 +138,7 @@ def _confirmed(
         source_row_checksum=source_row_checksum,
         quality="1080p",
         comment=comment,
+        history_id=history_id,
     )
 
 

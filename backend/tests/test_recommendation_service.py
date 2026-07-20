@@ -2,7 +2,7 @@
 import os
 from datetime import datetime, timedelta, timezone
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from backend.app.models.domain import (
     Feedback,
@@ -631,6 +631,20 @@ class RecommendationServiceTest(unittest.TestCase):
         self.assertEqual(("Tim Robbins", "Morgan Freeman"), movie.actors)
         self.assertEqual("https://movie.douban.com/subject/1292052/", movie.douban_url)
         self.assertEqual("https://img.example/poster.webp", movie.poster_url)
+
+    def test_postgres_candidate_restore_checks_current_database_eligibility(self) -> None:
+        repository = PostgresRecommendationRepository.__new__(PostgresRecommendationRepository)
+        repository.connection = Mock()
+        repository.connection.execute.return_value.rowcount = 1
+        repository._active_candidate_movie_ids = set()
+
+        repository.restore_candidate_pool_movie_if_eligible("movie-1")
+
+        query, params = repository.connection.execute.call_args.args
+        self.assertIn("vh.deleted_at IS NULL", query)
+        self.assertIn("w.status = %s", query)
+        self.assertEqual(("movie-1", WishlistStatus.ACTIVE.value), params[1:])
+        self.assertIn("movie-1", repository._active_candidate_movie_ids)
 
     def test_postgres_refresh_parameterizes_recommended_from_like_pattern(self) -> None:
         repository = PostgresRecommendationRepository.__new__(PostgresRecommendationRepository)

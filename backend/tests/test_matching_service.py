@@ -1,4 +1,5 @@
 ﻿import unittest
+from dataclasses import replace
 from datetime import date
 from tempfile import TemporaryDirectory
 
@@ -9,7 +10,6 @@ from backend.app.services.matching_service import (
     FakeDoubanSearchAdapter,
     FileDoubanSearchCache,
     InMemoryDoubanSearchCache,
-    InMemoryDoubanMatchRepository,
     METADATA_STRATEGY,
     SUBJECT_ID_STRATEGY,
     build_confirmed_viewing_history_inputs,
@@ -107,123 +107,6 @@ class MatchingServiceTest(unittest.TestCase):
         self.assertEqual(("metadata_match_required",), review.match_reasons)
         self.assertEqual("Still Walking", review.candidate_title)
 
-    def test_match_repository_saves_and_queries_by_status_idempotently(self) -> None:
-        repository = InMemoryDoubanMatchRepository()
-        queue = build_douban_match_inputs(
-            [
-                ViewingHistoryCandidate(
-                    source_raw_id="raw-1",
-                    source_sheet_name="MOVIES.xlsx#2026",
-                    source_row_number=2,
-                    title="A Pale View of Hills",
-                    user_rating=4.2,
-                    douban_subject_id="36913048",
-                ),
-                ViewingHistoryCandidate(
-                    source_raw_id="raw-2",
-                    source_sheet_name="MOVIES.xlsx#2025",
-                    source_row_number=3,
-                    title="Still Walking",
-                    user_rating=4.5,
-                ),
-            ]
-        )
-        result = run_local_match_rules(queue.inputs)
-
-        repository.save_all(result.candidates)
-        repository.save_all(result.candidates)
-
-        self.assertEqual(2, len(repository.all()))
-        self.assertEqual(1, len(repository.find_by_status(DoubanMatchStatus.AUTO_MATCHED)))
-        needs_review = repository.find_needs_review()
-        self.assertEqual(1, len(needs_review))
-        self.assertEqual("raw-2", needs_review[0].source_raw_id)
-
-    def test_match_repository_confirms_existing_candidate(self) -> None:
-        repository = InMemoryDoubanMatchRepository()
-        queue = build_douban_match_inputs(
-            [
-                ViewingHistoryCandidate(
-                    source_raw_id="raw-1",
-                    source_sheet_name="MOVIES.xlsx#2025",
-                    source_row_number=3,
-                    title="Still Walking",
-                    user_rating=4.5,
-                    release_year=2008,
-                ),
-            ]
-        )
-        result = run_search_match_job(
-            queue.inputs,
-            FakeDoubanSearchAdapter(
-                {
-                    "Still Walking": [
-                        DoubanSearchResult(subject_id="2222996", title="Still Walking", year=2008),
-                    ]
-                }
-            ),
-        )
-        repository.save_all(result.candidates)
-
-        confirmed = repository.confirm_match("raw-1")
-
-        self.assertEqual(DoubanMatchStatus.CONFIRMED, confirmed.status)
-        self.assertEqual("2222996", confirmed.candidate_subject_id)
-        self.assertEqual(("title_year_exact", "human_confirmed"), confirmed.match_reasons)
-        self.assertEqual([confirmed], repository.find_confirmed())
-
-    def test_match_repository_manual_subject_id_confirms_no_match(self) -> None:
-        repository = InMemoryDoubanMatchRepository()
-        queue = build_douban_match_inputs(
-            [
-                ViewingHistoryCandidate(
-                    source_raw_id="raw-1",
-                    source_sheet_name="MOVIES.xlsx#2025",
-                    source_row_number=3,
-                    title="Unknown Movie",
-                    user_rating=4.0,
-                    release_year=1990,
-                ),
-            ]
-        )
-        result = run_search_match_job(queue.inputs, FakeDoubanSearchAdapter())
-        repository.save_all(result.candidates)
-
-        self.assertEqual([], repository.find_confirmed())
-        confirmed = repository.set_manual_subject_id(
-            "raw-1",
-            "1299999",
-            title="Manual Movie",
-            year=1990,
-            director="Manual Director",
-        )
-
-        self.assertEqual(DoubanMatchStatus.CONFIRMED, confirmed.status)
-        self.assertEqual(1.0, confirmed.match_score)
-        self.assertEqual(("manual_subject_id",), confirmed.match_reasons)
-        self.assertEqual("1299999", confirmed.candidate_subject_id)
-        self.assertEqual("Manual Movie", confirmed.candidate_title)
-        self.assertEqual([confirmed], repository.find_confirmed())
-
-    def test_match_repository_rejects_confirm_without_subject_id(self) -> None:
-        repository = InMemoryDoubanMatchRepository()
-        queue = build_douban_match_inputs(
-            [
-                ViewingHistoryCandidate(
-                    source_raw_id="raw-1",
-                    source_sheet_name="MOVIES.xlsx#2025",
-                    source_row_number=3,
-                    title="Unknown Movie",
-                    user_rating=4.0,
-                ),
-            ]
-        )
-        result = run_search_match_job(queue.inputs, FakeDoubanSearchAdapter())
-        repository.save_all(result.candidates)
-
-        with self.assertRaises(ValueError):
-            repository.confirm_match("raw-1")
-
     def test_build_confirmed_viewing_history_inputs_uses_only_subject_id_and_user_history_fields(self) -> None:
         candidates = [
             ViewingHistoryCandidate(
@@ -254,11 +137,8 @@ class MatchingServiceTest(unittest.TestCase):
             [queue.inputs[0], queue.inputs[1]],
             FakeDoubanSearchAdapter({"Still Walking": [confirmed_match]}),
         )
-        repository = InMemoryDoubanMatchRepository()
-        repository.save_all(run_result.candidates)
-        repository.confirm_match("raw-1")
-
-        inputs = build_confirmed_viewing_history_inputs(candidates, repository.all())
+        confirmed = replace(run_result.candidates[0], status=DoubanMatchStatus.CONFIRMED)
+        inputs = build_confirmed_viewing_history_inputs(candidates, [confirmed, *run_result.candidates[1:]])
 
         self.assertEqual(1, len(inputs))
         self.assertEqual("raw-1", inputs[0].source_raw_id)

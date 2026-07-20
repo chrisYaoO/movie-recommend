@@ -13,6 +13,8 @@ from backend.app.db.repository import (
     PersistedMovie,
     PersistedViewingHistory,
     PersistViewingHistoryResult,
+    SheetSyncTask,
+    ViewingHistoryRow,
 )
 
 
@@ -71,6 +73,14 @@ class SQLiteViewingHistoryRepository:
                 updated_at TEXT NOT NULL
             );
 
+            CREATE TABLE IF NOT EXISTS sheet_sync_outbox (
+                history_id TEXT PRIMARY KEY REFERENCES viewing_history(id),
+                operation TEXT NOT NULL CHECK(operation IN ('upsert', 'delete')),
+                attempts INTEGER NOT NULL DEFAULT 0,
+                last_error TEXT,
+                updated_at TEXT NOT NULL
+            );
+
             CREATE TABLE IF NOT EXISTS candidate_subject_queue (
                 douban_subject_id TEXT PRIMARY KEY,
                 source_type TEXT NOT NULL,
@@ -106,9 +116,11 @@ class SQLiteViewingHistoryRepository:
         )
         self._add_column_if_missing("movies", "aka_titles_json", "TEXT NOT NULL DEFAULT '[]'")
         self._add_column_if_missing("viewing_history", "douban_subject_id", "TEXT")
+        self._add_column_if_missing("viewing_history", "deleted_at", "TEXT")
+        self.connection.execute("DROP INDEX IF EXISTS idx_viewing_history_source_row")
         self.connection.execute(
             """
-            CREATE UNIQUE INDEX IF NOT EXISTS idx_viewing_history_source_row
+            CREATE INDEX IF NOT EXISTS idx_viewing_history_source_row
             ON viewing_history(source_sheet_name, source_row_number)
             """
         )
@@ -158,6 +170,7 @@ class SQLiteViewingHistoryRepository:
             SELECT m.id, m.douban_subject_id, m.title, MIN(vh.created_at) AS first_watched_created_at
             FROM viewing_history vh
             JOIN movies m ON m.douban_subject_id = vh.douban_subject_id
+            WHERE vh.deleted_at IS NULL
             GROUP BY m.id, m.douban_subject_id, m.title
             ORDER BY first_watched_created_at, m.douban_subject_id
         """
@@ -180,7 +193,7 @@ class SQLiteViewingHistoryRepository:
             SELECT vh.douban_subject_id, MIN(vh.created_at) AS first_watched_created_at
             FROM viewing_history vh
             LEFT JOIN movies m ON m.douban_subject_id = vh.douban_subject_id
-            WHERE m.id IS NULL
+            WHERE m.id IS NULL AND vh.deleted_at IS NULL
             GROUP BY vh.douban_subject_id
             ORDER BY first_watched_created_at, vh.douban_subject_id
         """
@@ -214,6 +227,7 @@ class SQLiteViewingHistoryRepository:
                 SELECT m.id, m.douban_subject_id, m.title, MIN(vh.created_at) AS first_watched_created_at
                 FROM viewing_history vh
                 JOIN movies m ON m.douban_subject_id = vh.douban_subject_id
+                WHERE vh.deleted_at IS NULL
                 GROUP BY m.id, m.douban_subject_id, m.title
             ) watched
             LEFT JOIN history_recommendation_discovery discovery
@@ -245,6 +259,7 @@ class SQLiteViewingHistoryRepository:
                     SELECT m.douban_subject_id
                     FROM viewing_history vh
                     JOIN movies m ON m.douban_subject_id = vh.douban_subject_id
+                    WHERE vh.deleted_at IS NULL
                     GROUP BY m.id, m.douban_subject_id
                 ) watched
                 LEFT JOIN history_recommendation_discovery discovery
@@ -347,14 +362,19 @@ class SQLiteViewingHistoryRepository:
         confirmed: ConfirmedViewingHistoryInput,
         movie_id: str | None = None,
     ) -> PersistedViewingHistory:
+        history = self._write_viewing_history(confirmed, movie_id)
+        self.connection.commit()
+        return history
+
+    def _write_viewing_history(
+        self,
+        confirmed: ConfirmedViewingHistoryInput,
+        movie_id: str | None = None,
+    ) -> PersistedViewingHistory:
         if not confirmed.source_row_checksum:
             raise ValueError("source_row_checksum is required when raw viewing history is not persisted")
 
-        existing = self.connection.execute(
-            "SELECT id FROM viewing_history WHERE source_sheet_name = ? AND source_row_number = ?",
-            (confirmed.source_sheet_name, confirmed.source_row_number),
-        ).fetchone()
-        history_id = str(existing["id"]) if existing is not None else str(uuid4())
+        history_id = confirmed.history_id or str(uuid4())
         now = _utc_now()
 
         self.connection.execute(
@@ -364,7 +384,7 @@ class SQLiteViewingHistoryRepository:
                 source_row_checksum, source_sheet_name, source_row_number, created_at, updated_at
             )
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(source_sheet_name, source_row_number) DO UPDATE SET
+            ON CONFLICT(id) DO UPDATE SET
                 movie_id = excluded.movie_id,
                 douban_subject_id = excluded.douban_subject_id,
                 watched_date = excluded.watched_date,
@@ -372,6 +392,8 @@ class SQLiteViewingHistoryRepository:
                 quality = excluded.quality,
                 comment = excluded.comment,
                 source_row_checksum = excluded.source_row_checksum,
+                source_sheet_name = excluded.source_sheet_name,
+                source_row_number = excluded.source_row_number,
                 updated_at = excluded.updated_at
             """,
             (
@@ -389,12 +411,218 @@ class SQLiteViewingHistoryRepository:
                 now,
             ),
         )
-        self.connection.commit()
         return PersistedViewingHistory(
             id=history_id,
             douban_subject_id=confirmed.douban_subject_id,
             movie_id=movie_id,
             source_row_checksum=confirmed.source_row_checksum,
+        )
+
+    def save_viewing_history_and_enqueue(
+        self,
+        confirmed: ConfirmedViewingHistoryInput,
+        movie_id: str | None = None,
+    ) -> PersistedViewingHistory:
+        with self.connection:
+            history = self._write_viewing_history(confirmed, movie_id)
+            self._enqueue_sheet_sync(history.id, "upsert")
+        return history
+
+    def update_viewing_history_and_enqueue(
+        self,
+        history_id: str,
+        watched_date: date,
+        user_rating: float,
+        quality: str | None,
+        comment: str | None,
+        source_row_checksum: str,
+    ) -> bool:
+        now = _utc_now()
+        with self.connection:
+            cursor = self.connection.execute(
+                """UPDATE viewing_history
+                   SET watched_date = ?, user_rating = ?, quality = ?, comment = ?,
+                       source_row_checksum = ?, updated_at = ?
+                   WHERE id = ? AND deleted_at IS NULL""",
+                (_date_to_text(watched_date), user_rating, quality, comment, source_row_checksum, now, history_id),
+            )
+            if not cursor.rowcount:
+                return False
+            self._enqueue_sheet_sync(history_id, "upsert", now)
+        return True
+
+    def soft_delete_viewing_history_and_enqueue(self, history_id: str) -> bool:
+        now = _utc_now()
+        with self.connection:
+            cursor = self.connection.execute(
+                "UPDATE viewing_history SET deleted_at = COALESCE(deleted_at, ?), updated_at = ? WHERE id = ?",
+                (now, now, history_id),
+            )
+            if not cursor.rowcount:
+                return False
+            self._enqueue_sheet_sync(history_id, "delete", now)
+        return True
+
+    def find_pending_sheet_sync_tasks(self, limit: int = 50) -> list[SheetSyncTask]:
+        rows = self.connection.execute(
+            """SELECT history_id, operation, attempts, last_error, updated_at
+               FROM sheet_sync_outbox ORDER BY updated_at, history_id LIMIT ?""",
+            (limit,),
+        ).fetchall()
+        return [SheetSyncTask(**dict(row)) for row in rows]
+
+    def find_viewing_history(self, history_id: str, include_deleted: bool = False) -> ViewingHistoryRow | None:
+        where = "vh.id = ?" if include_deleted else "vh.id = ? AND vh.deleted_at IS NULL"
+        row = self.connection.execute(self._history_select() + f" WHERE {where}", (history_id,)).fetchone()
+        return self._history_row(row) if row else None
+
+    def find_active_viewing_history(
+        self,
+        limit: int = 50,
+        offset: int = 0,
+        year: int | None = None,
+        descending: bool = True,
+    ) -> list[ViewingHistoryRow]:
+        where = "vh.deleted_at IS NULL"
+        params: list[int] = []
+        if year is not None:
+            where += """ AND COALESCE(
+                CAST(substr(vh.watched_date, 1, 4) AS INTEGER),
+                CASE WHEN length(vh.source_sheet_name) = 4
+                          AND vh.source_sheet_name GLOB '[0-9][0-9][0-9][0-9]'
+                     THEN CAST(vh.source_sheet_name AS INTEGER) END
+            ) = ?"""
+            params.append(year)
+        direction = "DESC" if descending else "ASC"
+        rows = self.connection.execute(
+            self._history_select()
+            + f" WHERE {where} ORDER BY (vh.watched_date IS NULL), vh.watched_date {direction}, vh.created_at {direction} LIMIT ? OFFSET ?",
+            (*params, limit, offset),
+        ).fetchall()
+        return [self._history_row(row) for row in rows]
+
+    def count_active_viewing_history(self, year: int | None = None) -> int:
+        where = "deleted_at IS NULL"
+        params: tuple[int, ...] = ()
+        if year is not None:
+            where += """ AND COALESCE(
+                CAST(substr(watched_date, 1, 4) AS INTEGER),
+                CASE WHEN length(source_sheet_name) = 4
+                          AND source_sheet_name GLOB '[0-9][0-9][0-9][0-9]'
+                     THEN CAST(source_sheet_name AS INTEGER) END
+            ) = ?"""
+            params = (year,)
+        return int(self.connection.execute(f"SELECT COUNT(*) FROM viewing_history WHERE {where}", params).fetchone()[0])
+
+    def find_active_viewing_history_years(self) -> list[int]:
+        rows = self.connection.execute(
+            """SELECT DISTINCT watched_year AS year
+               FROM (
+                   SELECT COALESCE(
+                       CAST(substr(watched_date, 1, 4) AS INTEGER),
+                       CASE WHEN length(source_sheet_name) = 4
+                                 AND source_sheet_name GLOB '[0-9][0-9][0-9][0-9]'
+                            THEN CAST(source_sheet_name AS INTEGER) END
+                   ) AS watched_year
+                   FROM viewing_history
+                   WHERE deleted_at IS NULL
+               )
+               WHERE watched_year IS NOT NULL
+               ORDER BY watched_year DESC"""
+        ).fetchall()
+        return [int(row["year"]) for row in rows]
+
+    def complete_sheet_sync(
+        self,
+        history_id: str,
+        expected_updated_at: datetime | str,
+        sheet_name: str | None = None,
+        row_number: int | None = None,
+    ) -> None:
+        with self.connection:
+            if sheet_name is not None and row_number is not None:
+                self.connection.execute(
+                    "UPDATE viewing_history SET source_sheet_name = ?, source_row_number = ?, updated_at = ? WHERE id = ?",
+                    (sheet_name, row_number, _utc_now(), history_id),
+                )
+            self.connection.execute(
+                "DELETE FROM sheet_sync_outbox WHERE history_id = ? AND updated_at = ?",
+                (history_id, expected_updated_at),
+            )
+
+    def fail_sheet_sync(self, history_id: str, expected_updated_at: datetime | str, error: str) -> None:
+        self.connection.execute(
+            """UPDATE sheet_sync_outbox SET attempts = attempts + 1, last_error = ?, updated_at = ?
+               WHERE history_id = ? AND updated_at = ?""",
+            (error[:500], _utc_now(), history_id, expected_updated_at),
+        )
+        self.connection.commit()
+
+    def retry_sheet_sync(self, history_id: str) -> bool:
+        cursor = self.connection.execute(
+            "UPDATE sheet_sync_outbox SET attempts = 0, last_error = NULL, updated_at = ? WHERE history_id = ?",
+            (_utc_now(), history_id),
+        )
+        self.connection.commit()
+        return bool(cursor.rowcount)
+
+    def sheet_sync_health(self) -> dict[str, int | str | None]:
+        row = self.connection.execute(
+            """SELECT COUNT(*) AS pending_count,
+                      SUM(CASE WHEN attempts > 0 THEN 1 ELSE 0 END) AS failed_count,
+                      MAX(last_error) AS last_error
+               FROM sheet_sync_outbox"""
+        ).fetchone()
+        return {
+            "pending_count": int(row["pending_count"]),
+            "failed_count": int(row["failed_count"] or 0),
+            "last_error": row["last_error"],
+        }
+
+    @staticmethod
+    def _history_select() -> str:
+        return """
+            SELECT vh.id, vh.movie_id, vh.douban_subject_id, COALESCE(m.title, '') AS title,
+                   m.year, COALESCE(m.directors_json, '[]') AS directors, m.poster_url,
+                   vh.watched_date, vh.user_rating, vh.quality, vh.comment,
+                   vh.source_row_checksum, vh.source_sheet_name, vh.source_row_number, vh.deleted_at,
+                   outbox.operation AS sync_operation, COALESCE(outbox.attempts, 0) AS sync_attempts,
+                   outbox.last_error AS sync_error
+            FROM viewing_history vh
+            LEFT JOIN movies m ON m.id = vh.movie_id
+            LEFT JOIN sheet_sync_outbox outbox ON outbox.history_id = vh.id
+        """
+
+    @staticmethod
+    def _history_row(row) -> ViewingHistoryRow:
+        return ViewingHistoryRow(
+            id=str(row["id"]),
+            movie_id=str(row["movie_id"]) if row["movie_id"] is not None else None,
+            douban_subject_id=str(row["douban_subject_id"]),
+            title=str(row["title"]),
+            year=int(row["year"]) if row["year"] is not None else None,
+            directors=tuple(str(value) for value in json.loads(row["directors"] or "[]")),
+            poster_url=str(row["poster_url"]) if row["poster_url"] is not None else None,
+            watched_date=date.fromisoformat(row["watched_date"]) if row["watched_date"] else None,
+            user_rating=float(row["user_rating"]),
+            quality=row["quality"],
+            comment=row["comment"],
+            source_row_checksum=str(row["source_row_checksum"]),
+            source_sheet_name=str(row["source_sheet_name"]),
+            source_row_number=int(row["source_row_number"]),
+            deleted_at=row["deleted_at"],
+            sync_operation=row["sync_operation"],
+            sync_attempts=int(row["sync_attempts"]),
+            sync_error=row["sync_error"],
+        )
+
+    def _enqueue_sheet_sync(self, history_id: str, operation: str, now: str | None = None) -> None:
+        self.connection.execute(
+            """INSERT INTO sheet_sync_outbox(history_id, operation, attempts, last_error, updated_at)
+               VALUES (?, ?, 0, NULL, ?)
+               ON CONFLICT(history_id) DO UPDATE SET
+                   operation = excluded.operation, attempts = 0, last_error = NULL, updated_at = excluded.updated_at""",
+            (history_id, operation, now or _utc_now()),
         )
 
     def upsert_candidate_subject(
@@ -443,6 +671,37 @@ class SQLiteViewingHistoryRepository:
         if limit is not None:
             sql += " LIMIT ?"
             params = (status, limit)
+        rows = self.connection.execute(sql, params).fetchall()
+        return [
+            CandidateSubjectQueueItem(
+                douban_subject_id=str(row["douban_subject_id"]),
+                source_type=str(row["source_type"]),
+                source_ref=str(row["source_ref"]),
+                source_subject_id=str(row["source_subject_id"]) if row["source_subject_id"] is not None else None,
+                source_label=str(row["source_label"]) if row["source_label"] is not None else None,
+                status=str(row["status"]),
+            )
+            for row in rows
+        ]
+
+    def find_candidate_subjects_by_statuses(
+        self,
+        statuses: tuple[str, ...],
+        limit: int | None = None,
+    ) -> list[CandidateSubjectQueueItem]:
+        if not statuses:
+            return []
+        placeholders = ", ".join("?" for _ in statuses)
+        sql = f"""
+            SELECT douban_subject_id, source_type, source_ref, source_subject_id, source_label, status
+            FROM candidate_subject_queue
+            WHERE status IN ({placeholders})
+            ORDER BY created_at, douban_subject_id
+        """
+        params: tuple[object, ...] = tuple(statuses)
+        if limit is not None:
+            sql += " LIMIT ?"
+            params += (limit,)
         rows = self.connection.execute(sql, params).fetchall()
         return [
             CandidateSubjectQueueItem(

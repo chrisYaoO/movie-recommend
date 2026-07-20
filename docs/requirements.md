@@ -124,6 +124,15 @@ Auxiliary actions:
   - store rating, quality, comment, and watched date
   - use the rating and comment as strong feedback
 
+### Viewing History Management
+
+- List viewing history by year, defaulting to the current year, with incremental loading.
+- Sort watched records by date newest-first by default and allow reversing the order.
+- Allow editing watched date, rating, quality, and comment.
+- Deleting a viewing-history event must soft-delete the PostgreSQL row and remove its managed Google Sheets projection.
+- After deletion, reactivate an existing candidate-pool row only when the movie has no other active viewing-history event and no active wishlist entry.
+- Candidate-pool reactivation must not override the separate current effective `not_interested` exclusion.
+
 ### Rating Semantics
 
 The user's rating scale is selective and personal:
@@ -176,6 +185,7 @@ Current interactive API capabilities:
 - manage wishlist
 - manage current not-interested state
 - record watched movie
+- list, edit, delete, and retry synchronization for viewing-history records
 
 Import, matching, metadata enrichment, candidate-pool processing, and evaluation remain resumable CLI jobs rather than HTTP admin endpoints.
 

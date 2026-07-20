@@ -2,16 +2,20 @@
 
 from dataclasses import asdict, dataclass
 from datetime import date
+import logging
 import re
-from typing import Protocol
+from uuid import UUID, uuid4
 
 from backend.app.db.repository import ViewingHistoryRepository
 from backend.app.models.domain import ConfirmedViewingHistoryInput, DoubanMovieDetail
 from backend.app.services.display_text import display_person_names
-from backend.app.services.google_sheets_service import GoogleSheetsAppendService
 from backend.app.services.import_service import RAW_HASH_COLUMNS, stable_row_hash
 from backend.app.services.metadata_service import DoubanDetailAdapter
+from backend.app.services.viewing_history_sync_service import ViewingHistorySyncService
 from jobs.candidate_pool import DOUBAN_RECOMMENDATION_SOURCE, parse_recommended_subject_ids
+
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -28,6 +32,7 @@ class RecordViewingHistoryRequest:
     year: int | None = None
     quality: str | None = None
     comment: str | None = None
+    history_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -39,13 +44,10 @@ class RecordViewingHistoryResult:
     source_sheet_name: str
     source_row_number: int
     source_row_checksum: str
-    sheet_updated_range: str
+    sheet_updated_range: str | None
     fetched_movie_detail: bool
     recommendation_inserted_count: int
-
-
-class RecordViewingHistoryRepository(ViewingHistoryRepository, Protocol):
-    pass
+    sync_state: str = "synced"
 
 
 class ViewingHistoryRecordService:
@@ -53,19 +55,25 @@ class ViewingHistoryRecordService:
         self,
         repository: ViewingHistoryRepository,
         detail_adapter: DoubanDetailAdapter,
-        sheets: GoogleSheetsAppendService,
+        syncer: ViewingHistorySyncService,
     ) -> None:
         self.repository = repository
         self.detail_adapter = detail_adapter
-        self.sheets = sheets
+        self.syncer = syncer
 
     def record(self, request: RecordViewingHistoryRequest) -> RecordViewingHistoryResult:
         if not request.douban_subject_id.strip():
             raise ValueError("douban_subject_id is required")
         if not request.sheet.strip():
             raise ValueError("sheet is required")
+        if not 0 <= request.rating <= 5:
+            raise ValueError("rating must be between 0 and 5")
+        history_id = str(UUID(request.history_id)) if request.history_id else str(uuid4())
 
         subject_id = request.douban_subject_id.strip()
+        existing_history = self.repository.find_viewing_history(history_id, include_deleted=True)
+        if existing_history and existing_history.douban_subject_id != subject_id:
+            raise ValueError("history_id already belongs to another movie")
         existing_movie = self.repository.find_movie_by_subject_id(subject_id)
         detail = None
         if existing_movie is None:
@@ -88,48 +96,62 @@ class ViewingHistoryRecordService:
             image_id=image_id,
             request=request,
         )
-        appended = self.sheets.append_viewing_history_row(request.sheet.strip(), row_values)
         row_hash = _source_row_checksum(row_values)
         confirmed = ConfirmedViewingHistoryInput(
-            source_raw_id=f"google-sheets:{request.sheet}:{appended.row_number}",
-            source_sheet_name=request.sheet.strip(),
-            source_row_number=appended.row_number,
+            source_raw_id=f"local:{history_id}",
+            source_sheet_name=str(request.watched_date.year),
+            source_row_number=existing_history.source_row_number if existing_history else 0,
             douban_subject_id=subject_id,
             watched_date=request.watched_date,
             user_rating=request.rating,
             source_row_checksum=row_hash,
             quality=request.quality,
             comment=request.comment,
+            history_id=history_id,
         )
         recommendation_inserted_count = 0
         if detail is not None:
-            persisted = self.repository.persist_confirmed_viewing_history(confirmed, detail)
-            movie_id = persisted.movie.id
-            history_id = persisted.history.id
+            movie = self.repository.upsert_movie_detail(detail)
+            history = self.repository.save_viewing_history_and_enqueue(confirmed, movie.id)
+            movie_id = movie.id
+            history_id = history.id
             page_source = getattr(self.detail_adapter, "last_page_source", None)
             if page_source:
-                for recommended_id in parse_recommended_subject_ids(page_source, detail.subject_id):
-                    if self.repository.upsert_candidate_subject(
-                        recommended_id,
-                        source_type=DOUBAN_RECOMMENDATION_SOURCE,
-                        source_ref=f"recommended_from:{detail.subject_id}",
-                        source_subject_id=detail.subject_id,
-                        source_label=f"recommended from {detail.title}",
-                    ):
-                        recommendation_inserted_count += 1
+                try:
+                    for recommended_id in parse_recommended_subject_ids(page_source, detail.subject_id):
+                        if self.repository.upsert_candidate_subject(
+                            recommended_id,
+                            source_type=DOUBAN_RECOMMENDATION_SOURCE,
+                            source_ref=f"recommended_from:{detail.subject_id}",
+                            source_subject_id=detail.subject_id,
+                            source_label=f"recommended from {detail.title}",
+                        ):
+                            recommendation_inserted_count += 1
+                except Exception:
+                    logger.exception("Recommendation discovery failed after viewing history was saved")
         else:
-            history = self.repository.upsert_viewing_history(confirmed, existing_movie.id)
+            history = self.repository.save_viewing_history_and_enqueue(confirmed, existing_movie.id)
             movie_id = existing_movie.id
             history_id = history.id
+        self.syncer.sync_pending()
+        current = self.repository.find_viewing_history(history_id, include_deleted=True)
+        sync_state = "synced"
+        if current and current.sync_operation:
+            sync_state = "failed" if current.sync_attempts else "pending"
         return RecordViewingHistoryResult(
             movie_id=movie_id,
             viewing_history_id=history_id,
             douban_subject_id=subject_id,
             title=title,
             source_sheet_name=confirmed.source_sheet_name,
-            source_row_number=confirmed.source_row_number,
+            source_row_number=current.source_row_number if current else confirmed.source_row_number,
             source_row_checksum=row_hash,
-            sheet_updated_range=appended.updated_range,
+            sheet_updated_range=(
+                f"{current.source_sheet_name}!A{current.source_row_number}:J{current.source_row_number}"
+                if current and current.source_row_number >= 2 and sync_state == "synced"
+                else None
+            ),
+            sync_state=sync_state,
             fetched_movie_detail=detail is not None,
             recommendation_inserted_count=recommendation_inserted_count,
         )

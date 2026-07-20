@@ -1,6 +1,19 @@
-export type Tab = "recommend" | "record" | "wishlist" | "notInterested";
+export type Tab = "recommend" | "record" | "history" | "wishlist" | "notInterested";
 export type RecommendationStrategy = "hybrid" | "bandit_hybrid";
 export type ThemeMode = "system" | "light" | "dark";
+
+export type CandidateQueueStatus = {
+  pending_count: number;
+  failed_count: number;
+  processing: boolean;
+  processed_count: number;
+  current_subject_id: string | null;
+  current_source_label: string | null;
+  current_source_ref: string | null;
+  blocked_for_run: boolean;
+  failure_reason: string | null;
+  last_error: string | null;
+};
 
 export type SearchCandidate = {
   subject_id: string;
@@ -67,11 +80,30 @@ export type NotInterestedItem = {
 };
 
 export type RecordForm = {
+  history_id: string;
   watched_date: string;
   rating: string;
   quality: "1080p" | "4K" | "Other";
   custom_quality: string;
   comment: string;
+};
+
+export type ViewingHistoryItem = {
+  id: string;
+  title: string;
+  year: number | null;
+  directors: string[];
+  watched_date: string;
+  user_rating: number;
+  quality: string | null;
+  comment: string | null;
+  sync_state: "synced" | "pending" | "failed";
+  sync_attempts: number;
+  sync_error: string | null;
+};
+
+export type ViewingHistoryResponse = PagedResponse<ViewingHistoryItem> & {
+  years: number[];
 };
 
 export type RecordHandoff = {
@@ -94,6 +126,7 @@ export type RecordViewingHistoryResponse = {
   recommendation_item_id?: string;
   processing_status?: string | null;
   processed_at?: string | null;
+  sync_state: "synced" | "pending" | "failed";
 };
 
 export type UndoRecommendationProcessingResponse = Pick<

@@ -124,6 +124,7 @@ class ConfirmedViewingHistoryInput:
     source_row_checksum: str | None = None
     quality: str | None = None
     comment: str | None = None
+    history_id: str | None = None
 
 
 @dataclass(frozen=True)

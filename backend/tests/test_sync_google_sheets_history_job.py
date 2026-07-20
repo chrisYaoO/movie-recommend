@@ -1,23 +1,26 @@
 ﻿import os
 import unittest
+from datetime import date
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import Mock, patch
 
+from backend.app.config import (
+    GOOGLE_SHEETS_SCOPE,
+    config_value,
+    resolve_service_account_file,
+    resolve_spreadsheet_id,
+)
 from backend.app.db.sqlite_repository import SQLiteViewingHistoryRepository
 from backend.app.services.import_service import InMemoryViewingHistoryRawRepository, ViewingHistoryImportService
 from jobs.sync_google_sheets_history import (
     DEFAULT_DETAIL_ADAPTER,
     DEFAULT_SOURCE_NAME,
-    GOOGLE_SHEETS_SCOPE,
     GoogleSheetsValuesClient,
     _confirmed_subject_ids,
     _range_name,
     read_google_sheet_rows,
     replay_confirmed_progress_rows,
-    resolve_config_value,
-    resolve_service_account_file,
-    resolve_spreadsheet_id,
 )
 
 
@@ -48,6 +51,48 @@ class SyncGoogleSheetsHistoryJobTest(unittest.TestCase):
         self.assertEqual("1291561", imported.douban_subject_id_raw)
         self.assertEqual("456789", imported.douban_image_id_raw)
 
+    def test_month_day_sheet_dates_inherit_the_year_tab(self) -> None:
+        client = _FakeSheetsClient(
+            {
+                "2026!A:Z": [
+                    ["Date", "Name", "Director", "Year", "Rating"],
+                    ["1/2", "Yi Yi", "Edward Yang", 2000, 5.0],
+                ]
+            }
+        )
+
+        rows = read_google_sheet_rows(client, ["2026"])
+        service = ViewingHistoryImportService(InMemoryViewingHistoryRawRepository())
+        service.import_rows("google-sheets", rows)
+
+        self.assertEqual(date(2026, 1, 2), service.to_viewing_history_candidates().candidates[0].watched_date)
+
+    def test_replay_preserves_sheet_record_id(self) -> None:
+        history_id = "2aaae72e-6c6e-43b8-959b-b3584a68b718"
+        client = _FakeSheetsClient(
+            {
+                "2026!A:Z": [
+                    ["Date", "Name", "Director", "Year", "Rating", "RecordId"],
+                    ["1/2", "Yi Yi", "Edward Yang", 2000, 5.0, history_id],
+                ]
+            }
+        )
+
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            progress_path = root / "progress.json"
+            progress_path.write_text('{"items": []}', encoding="utf-8")
+            rows = read_google_sheet_rows(client, ["2026"])
+            rows[0]["DoubanSubjectId"] = "1291561"
+            with SQLiteViewingHistoryRepository(root / "movies.db") as repository:
+                repository.initialize_schema()
+                replay_confirmed_progress_rows("google-sheets", rows, progress_path, repository)
+                history = repository.connection.execute(
+                    "SELECT id, watched_date FROM viewing_history"
+                ).fetchone()
+
+        self.assertEqual((history_id, "2026-01-02"), tuple(history))
+
     def test_quotes_sheet_names_in_range(self) -> None:
         self.assertEqual("'Movie Reviews'!A:Z", _range_name("Movie Reviews", "A:Z"))
         self.assertEqual("'Director''s Cut'!A:J", _range_name("Director's Cut", "A:J"))
@@ -58,7 +103,7 @@ class SyncGoogleSheetsHistoryJobTest(unittest.TestCase):
             config_path = Path(directory) / ".env"
             config_path.write_text("GOOGLE_SHEETS_API_KEY=from-file\n", encoding="utf-8")
 
-            self.assertEqual("from-file", resolve_config_value(str(config_path), "GOOGLE_SHEETS_API_KEY"))
+            self.assertEqual("from-file", config_value(str(config_path), "GOOGLE_SHEETS_API_KEY"))
 
     def test_service_account_file_defaults_to_local_secrets_path(self) -> None:
         with TemporaryDirectory() as directory:

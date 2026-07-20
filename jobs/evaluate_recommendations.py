@@ -8,8 +8,8 @@ import sys
 from typing import Iterable
 
 from backend.app.models.domain import Feedback, FeedbackType, RecommendationSession, ViewingHistory
+from backend.app.config import resolve_postgres_dsn
 from backend.app.services.recommendation_service import PostgresRecommendationRepository, RecommendationService
-from jobs.import_auto_matched_history import resolve_postgres_dsn
 
 
 @dataclass(frozen=True)
@@ -193,7 +193,7 @@ def collect_candidate_pool_health(repository: PostgresRecommendationRepository) 
             COUNT(DISTINCT cp.movie_id) AS active_unique_movies,
             COUNT(DISTINCT cp.movie_id) FILTER (
                 WHERE NOT EXISTS (
-                    SELECT 1 FROM viewing_history vh WHERE vh.movie_id = cp.movie_id
+                    SELECT 1 FROM viewing_history vh WHERE vh.movie_id = cp.movie_id AND vh.deleted_at IS NULL
                 )
                 AND NOT EXISTS (
                     SELECT 1 FROM wishlist w WHERE w.movie_id = cp.movie_id AND w.status = 'active'
@@ -205,7 +205,7 @@ def collect_candidate_pool_health(repository: PostgresRecommendationRepository) 
             ) AS eligible_unique_movies,
             COUNT(DISTINCT cp.movie_id) FILTER (
                 WHERE EXISTS (
-                    SELECT 1 FROM viewing_history vh WHERE vh.movie_id = cp.movie_id
+                    SELECT 1 FROM viewing_history vh WHERE vh.movie_id = cp.movie_id AND vh.deleted_at IS NULL
                 )
             ) AS watched_candidate_count,
             COUNT(DISTINCT cp.movie_id) FILTER (
@@ -377,7 +377,9 @@ def _format_counter(values: dict[str, int]) -> list[str]:
 
 
 def _watched_movie_ids(repository: PostgresRecommendationRepository) -> set[str]:
-    rows = repository.connection.execute("SELECT DISTINCT movie_id FROM viewing_history").fetchall()
+    rows = repository.connection.execute(
+        "SELECT DISTINCT movie_id FROM viewing_history WHERE deleted_at IS NULL"
+    ).fetchall()
     return {str(row["movie_id"]) for row in rows}
 
 

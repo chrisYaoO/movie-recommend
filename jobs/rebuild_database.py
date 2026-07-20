@@ -4,7 +4,7 @@ import argparse
 import json
 from dataclasses import asdict, dataclass
 
-from jobs.import_auto_matched_history import resolve_postgres_dsn
+from backend.app.config import resolve_postgres_dsn
 
 
 COUNT_TABLES = [

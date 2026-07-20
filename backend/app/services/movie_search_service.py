@@ -6,12 +6,11 @@ import re
 from typing import Protocol
 
 from backend.app.models.domain import DoubanMatchInput
-from backend.app.config import load_local_env
+from backend.app.config import load_local_env, resolve_postgres_dsn
 from backend.app.services.matching_service import (
     DoubanHttpSearchAdapter,
     DoubanSearchAdapter,
 )
-from jobs.import_auto_matched_history import resolve_postgres_dsn
 
 load_local_env()
 

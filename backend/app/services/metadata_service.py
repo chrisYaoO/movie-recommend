@@ -9,7 +9,7 @@ import time
 from typing import Protocol
 from urllib.request import Request, urlopen
 
-from selenium.common.exceptions import TimeoutException
+from selenium.common.exceptions import TimeoutException, WebDriverException
 
 from backend.app.models.domain import DoubanMovieDetail
 
@@ -33,6 +33,10 @@ class DoubanDetailAdapter(Protocol):
     def fetch(self, subject_id: str) -> DoubanMovieDetail:
         pass
 
+    @property
+    def last_page_source(self) -> str | None:
+        pass
+
 
 class FakeDoubanDetailAdapter:
     def __init__(self, details_by_subject_id: dict[str, DoubanMovieDetail] | None = None) -> None:
@@ -42,6 +46,10 @@ class FakeDoubanDetailAdapter:
     def fetch(self, subject_id: str) -> DoubanMovieDetail:
         self.fetches.append(subject_id)
         return self.details_by_subject_id[subject_id]
+
+    @property
+    def last_page_source(self) -> str | None:
+        return None
 
 
 class DoubanHttpDetailAdapter:
@@ -119,18 +127,43 @@ class DoubanSeleniumDetailAdapter:
             self._throttle()
             url = f"https://movie.douban.com/subject/{subject_id}/"
             driver = self._ensure_driver()
-            driver.get(url)
-            if self.wait_for_json_ld:
+            load_timed_out = False
+            try:
+                driver.get(url)
+            except TimeoutException:
+                load_timed_out = True
+            if self.wait_for_json_ld and not load_timed_out:
                 try:
                     self._wait_until_detail_loaded(driver)
                 except TimeoutException:
                     pass
             self.last_request_at = time.monotonic()
-            self._last_page_source = driver.page_source
+            if load_timed_out:
+                try:
+                    current_url = driver.current_url
+                except WebDriverException as exc:
+                    raise self._page_load_timeout(subject_id) from exc
+                if f"/subject/{subject_id}/" not in current_url:
+                    raise self._page_load_timeout(subject_id)
+            try:
+                self._last_page_source = driver.page_source
+            except WebDriverException as exc:
+                if load_timed_out:
+                    raise self._page_load_timeout(subject_id) from exc
+                raise
 
-            detail = parse_douban_movie_detail(subject_id, driver.page_source, url)
+            detail = parse_douban_movie_detail(subject_id, self._last_page_source, url)
             if _is_invalid_detail_title(detail.title):
+                if load_timed_out:
+                    raise self._page_load_timeout(subject_id)
                 raise ValueError("Douban detail page did not contain movie metadata")
+            if load_timed_out:
+                try:
+                    driver.quit()
+                except WebDriverException:
+                    pass
+                finally:
+                    self.driver = None
             return detail
 
     @property
@@ -167,6 +200,7 @@ class DoubanSeleniumDetailAdapter:
         from selenium.webdriver.chrome.options import Options
 
         options = Options()
+        options.page_load_strategy = "eager"
         if self.chrome_binary_path:
             options.binary_location = self.chrome_binary_path
         if self.headless:
@@ -181,6 +215,11 @@ class DoubanSeleniumDetailAdapter:
                 {"profile.managed_default_content_settings.images": 2},
             )
         return webdriver.Chrome(options=options)
+
+    def _page_load_timeout(self, subject_id: str) -> TimeoutError:
+        return TimeoutError(
+            f"Chrome timed out loading Douban subject {subject_id} after {self.timeout_seconds:g}s"
+        )
 
     def _wait_until_detail_loaded(self, driver) -> None:
         from selenium.webdriver.common.by import By
@@ -427,9 +466,17 @@ def _extract_summary(html: str) -> str | None:
 
 
 def _extract_poster_url(html: str) -> str | None:
-    match = re.search(r'<img[^>]+rel=["\']v:image["\'][^>]+src=["\']([^"\']+)["\']', html, re.DOTALL)
+    match = re.search(
+        r'<img\b(?=[^>]*\brel=["\']v:image["\'])[^>]*\bsrc=["\']([^"\']+)["\'][^>]*>',
+        html,
+        re.DOTALL | re.IGNORECASE,
+    )
     if match is None:
-        match = re.search(r'<meta[^>]+itemprop=["\']image["\'][^>]+content=["\']([^"\']+)["\']', html, re.DOTALL)
+        match = re.search(
+            r'<meta\b(?=[^>]*\bitemprop=["\']image["\'])[^>]*\bcontent=["\']([^"\']+)["\'][^>]*>',
+            html,
+            re.DOTALL | re.IGNORECASE,
+        )
     if match is None:
         return None
     return unescape(match.group(1))

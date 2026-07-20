@@ -21,6 +21,53 @@ export function RefreshIcon() {
   );
 }
 
+export function HistoryIcon() {
+  return (
+    <svg className="button-icon" viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M3 12a9 9 0 1 0 3-6.7" />
+      <path d="M3 4v5h5" />
+      <path d="M12 7v5l3 2" />
+    </svg>
+  );
+}
+
+export function SortIcon({ ascending }: { ascending: boolean }) {
+  return (
+    <svg className={`button-icon sort-icon${ascending ? " ascending" : ""}`} viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M8 6h10" />
+      <path d="M8 10h7" />
+      <path d="M8 14h4" />
+      <path d="M4 5v14" />
+      <path d="m1.5 16.5 2.5 2.5 2.5-2.5" />
+    </svg>
+  );
+}
+
+export function EditIcon() {
+  return (
+    <svg className="button-icon" viewBox="0 0 24 24" aria-hidden="true">
+      <path d="m4 20 4.5-1 10-10a2.8 2.8 0 0 0-4-4l-10 10z" />
+      <path d="m13 6 4 4" />
+    </svg>
+  );
+}
+
+export function BugIcon() {
+  return (
+    <svg className="button-icon" viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M8 9h8" />
+      <path d="M9 5l-2-2" />
+      <path d="M15 5l2-2" />
+      <path d="M5 13H2" />
+      <path d="M22 13h-3" />
+      <path d="M5 18H3" />
+      <path d="M21 18h-2" />
+      <path d="M7 9v7a5 5 0 0 0 10 0V9a5 5 0 0 0-10 0z" />
+      <path d="M12 9v12" />
+    </svg>
+  );
+}
+
 export function SearchIcon() {
   return (
     <svg className="button-icon" viewBox="0 0 24 24" aria-hidden="true">

@@ -7,18 +7,18 @@ import json
 import re
 import sys
 import time
-from typing import Callable, Protocol
+from typing import Callable
 from urllib.request import Request, urlopen
 
+from backend.app.config import resolve_postgres_dsn
 from backend.app.db.postgres_repository import PostgresViewingHistoryRepository
-from backend.app.db.repository import ViewingHistoryRepository
+from backend.app.db.repository import CandidateSubjectQueueItem, ViewingHistoryRepository
 from backend.app.models.domain import DoubanMovieDetail
 from backend.app.services.metadata_service import (
     DEFAULT_CHROME_BINARY_PATH,
     DoubanDetailAdapter,
     DoubanSeleniumDetailAdapter,
 )
-from jobs.import_auto_matched_history import resolve_postgres_dsn
 
 DOUBAN_TOP250_SOURCE = "douban_top250"
 DOUBAN_RECOMMENDATION_SOURCE = "douban_recommendation"
@@ -28,15 +28,7 @@ QUEUE_STATUS_PENDING = "pending"
 HISTORY_RECOMMENDATION_STATUS_COMPLETED = "completed"
 HISTORY_RECOMMENDATION_STATUS_FAILED = "failed"
 StatusWriter = Callable[[str], None]
-
-
-class DoubanPageDetailAdapter(Protocol):
-    def fetch(self, subject_id: str) -> DoubanMovieDetail:
-        pass
-
-    @property
-    def last_page_source(self) -> str | None:
-        pass
+QueueItemStarted = Callable[[CandidateSubjectQueueItem], None]
 
 
 @dataclass(frozen=True)
@@ -54,6 +46,8 @@ class CandidateQueueProcessSummary:
     recommendation_discovered_count: int
     recommendation_inserted_count: int
     failed_count: int
+    failed_subject_id: str | None = None
+    last_error: str | None = None
 
 
 @dataclass(frozen=True)
@@ -154,20 +148,27 @@ def discover_top250_subjects(
 
 def process_candidate_queue(
     repository: ViewingHistoryRepository,
-    detail_adapter: DoubanPageDetailAdapter,
+    detail_adapter: DoubanDetailAdapter,
     limit: int | None = None,
     recommendation_parser: Callable[[str, str], list[str]] | None = None,
     status_writer: StatusWriter | None = None,
     queue_status: str = QUEUE_STATUS_PENDING,
+    queue_statuses: tuple[str, ...] | None = None,
+    item_started: QueueItemStarted | None = None,
 ) -> CandidateQueueProcessSummary:
     if recommendation_parser is None:
         recommendation_parser = parse_recommended_subject_ids
 
-    total_count = repository.count_candidate_subjects_by_status(queue_status)
-    pending_items = repository.find_candidate_subjects_by_status(queue_status, limit=limit)
+    selected_statuses = queue_statuses or (queue_status,)
+    total_count = sum(repository.count_candidate_subjects_by_status(status) for status in selected_statuses)
+    if queue_statuses is None:
+        pending_items = repository.find_candidate_subjects_by_status(queue_status, limit=limit)
+    else:
+        pending_items = repository.find_candidate_subjects_by_statuses(selected_statuses, limit=limit)
+    status_label = "+".join(selected_statuses)
     _write_status(
         status_writer,
-        f"[queue] status={queue_status}, remaining={total_count}, selected={len(pending_items)}, limit={limit}",
+        f"[queue] status={status_label}, remaining={total_count}, selected={len(pending_items)}, limit={limit}",
     )
 
     attempted_count = 0
@@ -177,9 +178,13 @@ def process_candidate_queue(
     recommendation_discovered_count = 0
     recommendation_inserted_count = 0
     failed_count = 0
+    failed_subject_id = None
+    last_error = None
 
     for item in pending_items:
         attempted_count += 1
+        if item_started is not None:
+            item_started(item)
         _write_status(
             status_writer,
             "[queue] "
@@ -236,18 +241,20 @@ def process_candidate_queue(
                 )
 
             repository.mark_candidate_subject_status(item.douban_subject_id, QUEUE_STATUS_ENRICHED)
-            remaining_count = repository.count_candidate_subjects_by_status(queue_status)
+            remaining_count = sum(repository.count_candidate_subjects_by_status(status) for status in selected_statuses)
             _write_status(
                 status_writer,
-                f"[queue] status=enriched subject={item.douban_subject_id}, remaining_{queue_status}={remaining_count}",
+                f"[queue] status=enriched subject={item.douban_subject_id}, remaining_{status_label}={remaining_count}",
             )
         except Exception as exc:
             failed_count += 1
+            failed_subject_id = item.douban_subject_id
+            last_error = str(exc)
             repository.mark_candidate_subject_status(item.douban_subject_id, QUEUE_STATUS_FAILED, str(exc))
-            remaining_count = repository.count_candidate_subjects_by_status(queue_status)
+            remaining_count = sum(repository.count_candidate_subjects_by_status(status) for status in selected_statuses)
             _write_status(
                 status_writer,
-                f"[queue] status=failed subject={item.douban_subject_id}, remaining_{queue_status}={remaining_count}, error={exc}",
+                f"[queue] status=failed subject={item.douban_subject_id}, remaining_{status_label}={remaining_count}, error={exc}",
             )
 
     _write_status(
@@ -270,12 +277,14 @@ def process_candidate_queue(
         recommendation_discovered_count=recommendation_discovered_count,
         recommendation_inserted_count=recommendation_inserted_count,
         failed_count=failed_count,
+        failed_subject_id=failed_subject_id,
+        last_error=last_error,
     )
 
 
 def discover_history_recommendations(
     repository: ViewingHistoryRepository,
-    detail_adapter: DoubanPageDetailAdapter,
+    detail_adapter: DoubanDetailAdapter,
     limit: int | None = None,
     recommendation_parser: Callable[[str, str], list[str]] | None = None,
     status_writer: StatusWriter | None = None,

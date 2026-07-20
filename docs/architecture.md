@@ -28,21 +28,22 @@ The system has four main parts:
 
 Live recommendation must not call Douban. It only reads PostgreSQL.
 
-The Add watched workflow is the intentional exception to the general offline-enrichment rule. It writes Google Sheets synchronously and fetches missing canonical watched-movie metadata synchronously so success means the source-of-truth row and local canonical link both exist.
+The Add watched workflow fetches missing canonical watched-movie metadata synchronously, then commits locally. Google Sheets is updated best-effort after the local commit; its availability never determines whether the history mutation succeeds.
 
 ## Data Flow
 
 ```text
-Google Sheets viewing history
+historical Google Sheets viewing history
 + existing confirmed progress JSON
--> viewing_history with source row identity and Douban subject IDs
+-> viewing_history with stable UUIDs and Douban subject IDs
 -> movie metadata rebuild from distinct viewing_history subject IDs
 -> movies + viewing_history.movie_id backfill
 -> one-layer recommendation queue from watched detail pages
 -> recommender
 -> recommendation session + recommendation items
 -> frontend feedback
--> feedback + wishlist + viewing_history updates
+-> local viewing_history updates + sheet_sync_outbox
+-> Google Sheets projection with hidden RecordId
 ```
 
 Candidate ingestion follows a related path:
@@ -90,7 +91,6 @@ movies/
 |   |-- sync_google_sheets_history.py
 |   |-- import_auto_matched_history.py
 |   |-- rebuild_movies_from_history.py
-|   |-- enrich_douban.py
 |   `-- candidate_pool.py
 |-- frontend/
 |   `-- src/
@@ -166,12 +166,50 @@ comment text
 source_sheet_name text
 source_row_number integer
 source_row_checksum text
+deleted_at timestamptz nullable
 created_at timestamptz
 updated_at timestamptz
-unique(source_sheet_name, source_row_number)
+index(source_sheet_name, source_row_number) -- non-unique cached locator
 ```
 
-`source_sheet_name + source_row_number` is the stable source identity. `source_row_checksum` is a non-unique row-content checksum for change detection. `douban_subject_id` is the primary external movie identity for history rows; `movie_id` is filled after the corresponding `movies` row has been fetched.
+`id` is the stable viewing-event identity. `source_sheet_name + source_row_number` is a mutable cached Sheet locator and must be validated against the row's hidden `RecordId` before update or delete. `source_row_checksum` covers A:I only and verifies projected content. `douban_subject_id` identifies the movie, not the viewing event; repeated viewings remain separate UUID rows.
+
+### sheet_sync_outbox
+
+One replacing pending task per history UUID:
+
+```text
+history_id uuid primary key references viewing_history(id)
+operation text check (operation in ('upsert', 'delete'))
+attempts integer
+last_error text nullable
+updated_at timestamptz
+```
+
+History mutation and outbox replacement share one database transaction. The in-process worker processes tasks in deterministic order, updates the cached locator after a successful upsert, and removes only the exact task version it processed so a concurrent newer edit cannot be lost. Failures increment attempts and remain retryable. Deletes are local soft deletes first and exact-UUID Sheet row deletions later. After a delete, an existing candidate-pool row is reactivated only when no other active `viewing_history` row and no active wishlist row exists for that movie. Current effective `not_interested` feedback remains an independent hard exclusion in recommendation filtering.
+
+The Sheet projection occupies A:J. A:I retains the existing user fields; J is the hidden `RecordId`. Changing `watched_date` across years writes the target year tab before deleting the old row. Runtime sync is one-way, so direct edits to managed Sheet rows are unsupported.
+
+### Migration And Recovery
+
+Run and review the read-only reconciliation first:
+
+```bash
+.venv/bin/python -m jobs.migrate_viewing_history_record_ids audit --config-path .env
+```
+
+Apply the idempotent schema migration, then pass the reviewed audit report explicitly to the resumable `RecordId` backfill:
+
+```bash
+.venv/bin/python -m jobs.migrate_viewing_history_schema apply --config-path .env
+.venv/bin/python -m jobs.migrate_viewing_history_record_ids apply \
+  --config-path .env \
+  --audit-report data/audits/viewing-history-record-id-audit-YYYYMMDD-HHMMSS.json
+```
+
+Progress is stored in `data/cache/viewing-history-record-id-migration.json`; rerunning the same apply command is safe. Timestamped audit and apply reports remain under `data/audits/`. On interruption, rerun apply and then audit again. Do not remove `RecordId` or restore the old unique locator index after the application has begun writing through the outbox; recovery is to leave pending tasks intact, correct the external failure, and retry from the History UI or backend startup.
+
+Inspect sync health with `GET /viewing-history-sync/status`. Retry one failed task with `POST /viewing-history/{history_id}/sync`.
 
 ### douban_match_candidates
 
@@ -601,6 +639,10 @@ See `docs/contextual-bandit-design.md` for bandit-specific reward resolution and
 ```text
 GET  /movies/search?q={query}
 POST /viewing-history
+GET  /viewing-history?year={year}&limit={limit}&offset={offset}&order={asc|desc}
+PATCH /viewing-history/{history_id}
+DELETE /viewing-history/{history_id}
+POST /viewing-history/{history_id}/sync
 GET  /recommendations?strategy=hybrid
 GET  /recommendations/{session_id}
 POST /recommendations/{session_id}/items/{item_id}/feedback

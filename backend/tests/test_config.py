@@ -4,7 +4,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from backend.app.config import load_local_env
+from backend.app.config import load_local_env, resolve_service_account_file, resolve_spreadsheet_id
 
 
 class ConfigTest(unittest.TestCase):
@@ -28,6 +28,23 @@ class ConfigTest(unittest.TestCase):
                 self.assertEqual("postgres", os.environ["MOVIES_RECOMMENDATION_BACKEND"])
                 self.assertEqual("postgresql://from-env", os.environ["MOVIES_POSTGRES_DSN"])
                 self.assertEqual({"MOVIES_RECOMMENDATION_BACKEND": "postgres"}, loaded)
+
+    def test_google_sheets_environment_overrides_support_isolated_runtime(self) -> None:
+        with patch.dict(
+            os.environ,
+            {
+                "GOOGLE_SHEETS_SERVICE_ACCOUNT_FILE": "/private/tmp/missing-test-credentials.json",
+                "GOOGLE_SHEETS_SPREADSHEET_ID": "isolated-test-spreadsheet-id-12345",
+            },
+        ):
+            self.assertEqual(
+                "/private/tmp/missing-test-credentials.json",
+                resolve_service_account_file("missing.env"),
+            )
+            self.assertEqual(
+                "isolated-test-spreadsheet-id-12345",
+                resolve_spreadsheet_id("missing.env"),
+            )
 
 
 if __name__ == "__main__":

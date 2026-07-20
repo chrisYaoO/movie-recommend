@@ -125,6 +125,42 @@ class CandidatePoolJobTest(unittest.TestCase):
         self.assertEqual(1, result.enriched_count)
         self.assertEqual([("failed-subject", "enriched"), ("pending-subject", "pending")], [tuple(row) for row in queue_rows])
 
+    def test_process_queue_can_mix_failed_and_pending_in_database_order(self) -> None:
+        started = []
+        with TemporaryDirectory() as directory:
+            with SQLiteViewingHistoryRepository(Path(directory) / "movies.db") as repository:
+                repository.initialize_schema()
+                repository.upsert_candidate_subject("older-failed", DOUBAN_TOP250_SOURCE, "top1")
+                repository.upsert_candidate_subject("newer-pending", DOUBAN_TOP250_SOURCE, "top2")
+                repository.mark_candidate_subject_status("older-failed", "failed", "temporary failure")
+                adapter = _FakeDetailPageAdapter(
+                    {"older-failed": _detail("older-failed", "Recovered Movie")},
+                    {"older-failed": ""},
+                )
+
+                result = process_candidate_queue(
+                    repository,
+                    adapter,
+                    limit=1,
+                    queue_statuses=("failed", "pending"),
+                    item_started=started.append,
+                )
+
+        self.assertEqual(1, result.attempted_count)
+        self.assertEqual(["older-failed"], [item.douban_subject_id for item in started])
+
+    def test_process_queue_returns_failed_subject_and_reason(self) -> None:
+        with TemporaryDirectory() as directory:
+            with SQLiteViewingHistoryRepository(Path(directory) / "movies.db") as repository:
+                repository.initialize_schema()
+                repository.upsert_candidate_subject("broken-subject", DOUBAN_TOP250_SOURCE, "top1")
+
+                result = process_candidate_queue(repository, _FakeDetailPageAdapter({}, {}), limit=1)
+
+        self.assertEqual(1, result.failed_count)
+        self.assertEqual("broken-subject", result.failed_subject_id)
+        self.assertTrue(result.last_error)
+
     def test_process_queue_writes_status_progress(self) -> None:
         messages: list[str] = []
         with TemporaryDirectory() as directory:

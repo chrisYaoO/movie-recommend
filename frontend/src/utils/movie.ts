@@ -36,10 +36,6 @@ export function movieMatchesFilter(movie: Movie, filterText: string) {
   return movieFilterText(movie).includes(query);
 }
 
-export function formatPersonNames(values: Array<string | null | undefined>) {
-  return values.map((value) => formatPersonName(value)).filter(Boolean);
-}
-
 export function searchCandidateFromMovie(movie: Movie): SearchCandidate {
   return {
     subject_id: subjectIdFromDoubanUrl(movie.douban_url) || movie.id,
@@ -70,23 +66,6 @@ function movieFilterText(movie: Movie) {
     .filter(Boolean)
     .join(" ")
     .toLocaleLowerCase();
-}
-
-function formatPersonName(value: string | null | undefined) {
-  const text = (value || "").trim();
-  const match = text.match(/[a-zA-Z]/);
-  if (!match || match.index === undefined) return text;
-
-  const localPart = text.slice(0, match.index).trim();
-  const foreignPart = text.slice(match.index).trim();
-  if (!localPart) return foreignPart;
-  if (hasMiddleDot(localPart)) return foreignPart || localPart;
-  if (!/[\u3400-\u9fff\u3040-\u30ff\uac00-\ud7af]/.test(localPart)) return foreignPart || localPart;
-  return localPart;
-}
-
-function hasMiddleDot(value: string) {
-  return ["\u00b7", "\u30fb", "\u2022", ".", "\u251e"].some((marker) => value.includes(marker));
 }
 
 function subjectIdFromDoubanUrl(url: string) {

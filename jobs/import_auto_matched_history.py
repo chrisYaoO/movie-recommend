@@ -10,6 +10,7 @@ import time
 from typing import Any, Callable
 from uuid import uuid4
 
+from backend.app.config import resolve_postgres_dsn
 from backend.app.db.postgres_repository import PostgresViewingHistoryRepository
 from backend.app.db.repository import ViewingHistoryRepository
 from backend.app.models.domain import DoubanMatchStatus
@@ -745,38 +746,6 @@ def _next_unfinished_index(candidates, completed_items: CompletedResumeItems) ->
     for index, candidate in enumerate(candidates):
         if not completed_items.contains(candidate):
             return index
-    return None
-
-
-def resolve_postgres_dsn(dsn_arg: str | None, config_path: str | Path = ".env") -> str:
-    env_dsn = os.getenv("MOVIES_POSTGRES_DSN")
-    config_dsn = _load_config_value(config_path, "MOVIES_POSTGRES_DSN")
-    env_literals = {"$env:MOVIES_POSTGRES_DSN", "%MOVIES_POSTGRES_DSN%"}
-    if dsn_arg and dsn_arg not in env_literals:
-        return dsn_arg
-    if env_dsn:
-        return env_dsn
-    if config_dsn:
-        return config_dsn
-    if dsn_arg in env_literals:
-        raise ValueError(
-            f"{dsn_arg} was passed literally; set MOVIES_POSTGRES_DSN, add it to {config_path}, or pass the actual DSN."
-        )
-    raise ValueError(f"PostgreSQL DSN is required. Pass --dsn, set MOVIES_POSTGRES_DSN, or add it to {config_path}.")
-
-
-def _load_config_value(config_path: str | Path, key: str) -> str | None:
-    path = Path(config_path)
-    if not path.exists():
-        return None
-    for raw_line in path.read_text(encoding="utf-8").splitlines():
-        line = raw_line.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        name, value = line.split("=", 1)
-        if name.strip() != key:
-            continue
-        return value.strip().strip('"').strip("'") or None
     return None
 
 

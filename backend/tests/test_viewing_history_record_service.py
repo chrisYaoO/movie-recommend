@@ -5,8 +5,9 @@ from tempfile import TemporaryDirectory
 
 from backend.app.db.sqlite_repository import SQLiteViewingHistoryRepository
 from backend.app.models.domain import DoubanMovieDetail
-from backend.app.services.google_sheets_service import AppendSheetRowResult
+from backend.app.services.google_sheets_service import SheetHistoryLocation
 from backend.app.services.metadata_service import FakeDoubanDetailAdapter
+from backend.app.services.viewing_history_sync_service import ViewingHistorySyncService
 from backend.app.services.viewing_history_record_service import (
     RecordViewingHistoryRequest,
     ViewingHistoryRecordService,
@@ -37,7 +38,7 @@ class ViewingHistoryRecordServiceTest(unittest.TestCase):
                 service = ViewingHistoryRecordService(
                     repository=repository,
                     detail_adapter=detail_adapter,
-                    sheets=sheets,
+                    syncer=ViewingHistorySyncService(repository, sheets),
                 )
 
                 result = service.record(
@@ -63,7 +64,8 @@ class ViewingHistoryRecordServiceTest(unittest.TestCase):
         self.assertEqual(0, result.recommendation_inserted_count)
         self.assertEqual("2026", result.source_sheet_name)
         self.assertEqual(27, result.source_row_number)
-        self.assertEqual("2026!A27:I27", result.sheet_updated_range)
+        self.assertEqual("2026!A27:J27", result.sheet_updated_range)
+        self.assertEqual("synced", result.sync_state)
         self.assertEqual("2222996", movie["douban_subject_id"])
         self.assertEqual(movie["id"], history["movie_id"])
         self.assertEqual("2222996", history["douban_subject_id"])
@@ -104,7 +106,7 @@ class ViewingHistoryRecordServiceTest(unittest.TestCase):
                 service = ViewingHistoryRecordService(
                     repository=repository,
                     detail_adapter=detail_adapter,
-                    sheets=sheets,
+                    syncer=ViewingHistorySyncService(repository, sheets),
                 )
 
                 result = service.record(
@@ -138,18 +140,52 @@ class ViewingHistoryRecordServiceTest(unittest.TestCase):
             sheets.rows[0],
         )
 
+    def test_sheet_failure_does_not_roll_back_local_history(self) -> None:
+        detail = DoubanMovieDetail(subject_id="2222996", title="Still Walking", year=2008)
+        sheets = _FakeSheets(error=TimeoutError("offline"))
+
+        with TemporaryDirectory() as directory:
+            with SQLiteViewingHistoryRepository(Path(directory) / "movies.db") as repository:
+                repository.initialize_schema()
+                service = ViewingHistoryRecordService(
+                    repository,
+                    FakeDoubanDetailAdapter({"2222996": detail}),
+                    ViewingHistorySyncService(repository, sheets),
+                )
+
+                result = service.record(
+                    RecordViewingHistoryRequest(
+                        douban_subject_id="2222996",
+                        watched_date=date(2026, 5, 26),
+                        rating=4.5,
+                        sheet="2026",
+                    )
+                )
+                history_count = repository.connection.execute("SELECT COUNT(*) FROM viewing_history").fetchone()[0]
+                task = repository.find_pending_sheet_sync_tasks()[0]
+
+        self.assertEqual("failed", result.sync_state)
+        self.assertEqual(1, history_count)
+        self.assertEqual(1, task.attempts)
+
 
 class _FakeSheets:
-    def __init__(self):
+    def __init__(self, error=None):
         self.rows = []
+        self.error = error
 
-    def append_viewing_history_row(self, sheet_name, values):
-        self.rows.append(values)
-        return AppendSheetRowResult(
-            sheet_name=sheet_name,
+    def upsert_history_row(self, projection, hinted_sheet_name, hinted_row_number):
+        self.rows.append(projection.values)
+        if self.error:
+            raise self.error
+        return SheetHistoryLocation(
+            sheet_name=projection.sheet_name,
             row_number=27,
-            updated_range=f"{sheet_name}!A27:I27",
+            updated_range=f"{projection.sheet_name}!A27:J27",
         )
+
+    def delete_history_row(self, history_id, hinted_sheet_name, hinted_row_number):
+        return True
 
 
 if __name__ == "__main__":

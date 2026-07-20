@@ -10,6 +10,7 @@ from threading import RLock
 from typing import Any, Literal, Protocol
 
 from backend.app.config import load_local_env
+from backend.app.db.postgres_repository import initialize_interaction_schema
 from backend.app.models.domain import (
     Feedback,
     FeedbackType,
@@ -336,7 +337,8 @@ class PostgresRecommendationRepository:
         self.lock = RLock()
         self._active_candidate_movie_ids: set[str] = set()
         self._active_candidate_sources: dict[str, tuple[str | None, str | None]] = {}
-        self._initialize_interaction_schema()
+        with self.connection.transaction():
+            initialize_interaction_schema(self.connection)
 
     def close(self) -> None:
         self.connection.close()
@@ -379,6 +381,7 @@ class PostgresRecommendationRepository:
             """
             SELECT movie_id, watched_date, user_rating, quality, comment, id, created_at
             FROM viewing_history
+            WHERE deleted_at IS NULL
             ORDER BY watched_date, created_at
             """
         ).fetchall()
@@ -418,7 +421,7 @@ class PostgresRecommendationRepository:
               AND NOT EXISTS (
                   SELECT 1
                   FROM viewing_history vh
-                  WHERE vh.movie_id = cp.movie_id
+                  WHERE vh.movie_id = cp.movie_id AND vh.deleted_at IS NULL
               )
             ORDER BY cp.movie_id, cp.updated_at DESC, cp.created_at DESC
             """,
@@ -704,19 +707,24 @@ class PostgresRecommendationRepository:
         self._active_candidate_movie_ids.discard(movie_id)
 
     def restore_candidate_pool_movie_if_eligible(self, movie_id: str) -> None:
-        if any(item.movie_id == movie_id for item in self.history):
-            return
-        if self.find_active_wishlist_by_movie(movie_id) is not None:
-            return
-        self.connection.execute(
+        cursor = self.connection.execute(
             """
-            UPDATE candidate_pool
+            UPDATE candidate_pool cp
             SET active = TRUE, updated_at = %s
-            WHERE movie_id = %s
+            WHERE cp.movie_id = %s
+              AND NOT EXISTS (
+                  SELECT 1 FROM viewing_history vh
+                  WHERE vh.movie_id = cp.movie_id AND vh.deleted_at IS NULL
+              )
+              AND NOT EXISTS (
+                  SELECT 1 FROM wishlist w
+                  WHERE w.movie_id = cp.movie_id AND w.status = %s
+              )
             """,
-            (datetime.now(timezone.utc), movie_id),
+            (datetime.now(timezone.utc), movie_id, WishlistStatus.ACTIVE.value),
         )
-        self._active_candidate_movie_ids.add(movie_id)
+        if cursor.rowcount:
+            self._active_candidate_movie_ids.add(movie_id)
 
     def add_to_wishlist(self, movie: Movie, session_id: str) -> WishlistItem:
         existing = self.find_active_wishlist_by_movie(movie.id)
@@ -783,15 +791,19 @@ class PostgresRecommendationRepository:
 
     def add_viewing_history(self, history: ViewingHistory, wishlist_id: str) -> ViewingHistory:
         now = history.created_at
+        subject_id = _subject_id_from_douban_url(self.movies_by_id[history.movie_id].douban_url)
+        if not subject_id:
+            raise ValueError("movie has no Douban subject id")
         self.connection.execute(
             """
             INSERT INTO viewing_history (
-                id, movie_id, watched_date, user_rating, quality, comment,
+                id, movie_id, douban_subject_id, watched_date, user_rating, quality, comment,
                 source_row_checksum, source_sheet_name, source_row_number, created_at, updated_at
             )
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, 0, %s, %s)
-            ON CONFLICT(source_sheet_name, source_row_number) DO UPDATE SET
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, 0, %s, %s)
+            ON CONFLICT(id) DO UPDATE SET
                 movie_id = excluded.movie_id,
+                douban_subject_id = excluded.douban_subject_id,
                 watched_date = excluded.watched_date,
                 user_rating = excluded.user_rating,
                 quality = excluded.quality,
@@ -802,6 +814,7 @@ class PostgresRecommendationRepository:
             (
                 history.id,
                 history.movie_id,
+                subject_id,
                 history.watched_date,
                 history.user_rating,
                 history.quality,
@@ -954,69 +967,6 @@ class PostgresRecommendationRepository:
                 closed_at=row["closed_at"],
             )
             self.wishlist[item.id] = item
-
-    def _initialize_interaction_schema(self) -> None:
-        with self.connection.transaction():
-            self.connection.execute(
-                """
-                CREATE TABLE IF NOT EXISTS recommendation_sessions (
-                    id UUID PRIMARY KEY,
-                    strategy TEXT NOT NULL,
-                    context_snapshot JSONB NOT NULL DEFAULT '{}'::jsonb,
-                    created_at TIMESTAMPTZ NOT NULL
-                )
-                """
-            )
-            self.connection.execute(
-                """
-                CREATE TABLE IF NOT EXISTS recommendation_items (
-                    id UUID PRIMARY KEY,
-                    session_id UUID NOT NULL REFERENCES recommendation_sessions(id),
-                    movie_id UUID NOT NULL REFERENCES movies(id),
-                    rank INTEGER NOT NULL,
-                    slot_type TEXT NOT NULL,
-                    score NUMERIC NOT NULL,
-                    score_components JSONB NOT NULL DEFAULT '{}'::jsonb,
-                    source_ref TEXT,
-                    source_label TEXT,
-                    processing_status TEXT,
-                    processed_at TIMESTAMPTZ,
-                    created_at TIMESTAMPTZ NOT NULL,
-                    UNIQUE(session_id, rank)
-                )
-                """
-            )
-            self.connection.execute("ALTER TABLE recommendation_items ADD COLUMN IF NOT EXISTS source_ref TEXT")
-            self.connection.execute("ALTER TABLE recommendation_items ADD COLUMN IF NOT EXISTS source_label TEXT")
-            self.connection.execute("ALTER TABLE recommendation_items ADD COLUMN IF NOT EXISTS processing_status TEXT")
-            self.connection.execute("ALTER TABLE recommendation_items ADD COLUMN IF NOT EXISTS processed_at TIMESTAMPTZ")
-            self.connection.execute("ALTER TABLE IF EXISTS candidate_pool ADD COLUMN IF NOT EXISTS source_label TEXT")
-            self.connection.execute(
-                """
-                CREATE TABLE IF NOT EXISTS feedback (
-                    id UUID PRIMARY KEY,
-                    session_id UUID NOT NULL REFERENCES recommendation_sessions(id),
-                    item_id UUID NOT NULL REFERENCES recommendation_items(id),
-                    movie_id UUID NOT NULL REFERENCES movies(id),
-                    feedback_type TEXT NOT NULL,
-                    feedback_value NUMERIC NOT NULL,
-                    comment TEXT,
-                    created_at TIMESTAMPTZ NOT NULL
-                )
-                """
-            )
-            self.connection.execute(
-                """
-                CREATE TABLE IF NOT EXISTS wishlist (
-                    id UUID PRIMARY KEY,
-                    movie_id UUID NOT NULL REFERENCES movies(id),
-                    source_session_id UUID NOT NULL REFERENCES recommendation_sessions(id),
-                    status TEXT NOT NULL,
-                    created_at TIMESTAMPTZ NOT NULL,
-                    closed_at TIMESTAMPTZ
-                )
-                """
-            )
 
     def _jsonb(self, value: Any):
         from psycopg.types.json import Jsonb
@@ -1217,6 +1167,10 @@ class RecommendationService:
 
     def mark_watched_movie(self, movie_id: str) -> None:
         self.repository.deactivate_candidate_pool_movie(movie_id)
+
+    def restore_candidate_pool_movie_if_eligible(self, movie_id: str) -> None:
+        with self._repository_lock_context():
+            self.repository.restore_candidate_pool_movie_if_eligible(movie_id)
 
     def mark_wishlist_item_watched_from_record(self, wishlist_id: str, movie_id: str | None = None) -> WishlistItem:
         wishlist_item = self.repository.find_wishlist_item(wishlist_id)

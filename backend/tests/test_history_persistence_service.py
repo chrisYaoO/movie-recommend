@@ -86,7 +86,7 @@ class HistoryPersistenceServiceTest(unittest.TestCase):
         self.assertEqual(1, movie_count)
         self.assertEqual(1, history_count)
 
-    def test_reimport_same_source_row_checksum_updates_history(self) -> None:
+    def test_same_source_row_does_not_collapse_distinct_viewing_events(self) -> None:
         with TemporaryDirectory() as directory:
             adapter = FakeDoubanDetailAdapter()
 
@@ -109,12 +109,12 @@ class HistoryPersistenceServiceTest(unittest.TestCase):
                 history_count = repository.connection.execute("SELECT COUNT(*) FROM viewing_history").fetchone()[0]
                 history = repository.connection.execute("SELECT * FROM viewing_history").fetchone()
 
-        self.assertEqual(first.items[0].viewing_history_id, second.items[0].viewing_history_id)
-        self.assertEqual(1, history_count)
-        self.assertEqual(4.5, history["user_rating"])
-        self.assertEqual("updated", history["comment"])
+        self.assertNotEqual(first.items[0].viewing_history_id, second.items[0].viewing_history_id)
+        self.assertEqual(2, history_count)
+        self.assertEqual(4.0, history["user_rating"])
+        self.assertEqual("first", history["comment"])
 
-    def test_reimport_same_source_row_with_changed_hash_updates_history(self) -> None:
+    def test_explicit_history_id_updates_history(self) -> None:
         with TemporaryDirectory() as directory:
             adapter = FakeDoubanDetailAdapter()
 
@@ -129,7 +129,15 @@ class HistoryPersistenceServiceTest(unittest.TestCase):
                     repository,
                 )
                 second = persist_confirmed_viewing_history(
-                    [_confirmed("1291992", "checksum-after", rating=4.5, comment="updated")],
+                    [
+                        _confirmed(
+                            "1291992",
+                            "checksum-after",
+                            rating=4.5,
+                            comment="updated",
+                            history_id=first.items[0].viewing_history_id,
+                        )
+                    ],
                     adapter,
                     repository,
                 )
@@ -149,6 +157,7 @@ def _confirmed(
     source_row_checksum: str,
     rating: float = 4.2,
     comment: str = "test comment",
+    history_id: str | None = None,
 ) -> ConfirmedViewingHistoryInput:
     return ConfirmedViewingHistoryInput(
         source_raw_id=f"raw-{source_row_checksum}",
@@ -160,6 +169,7 @@ def _confirmed(
         source_row_checksum=source_row_checksum,
         quality="1080p",
         comment=comment,
+        history_id=history_id,
     )
 
 

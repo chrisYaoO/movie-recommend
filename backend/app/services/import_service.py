@@ -181,7 +181,7 @@ def map_raw_viewing_history(rows: list[ViewingHistoryRaw]) -> ViewingHistoryMapp
                 title=title,
                 user_rating=rating,
                 source_row_checksum=row.source_row_checksum,
-                watched_date=_parse_date(row.date_raw),
+                watched_date=_parse_date(row.date_raw, row.source_sheet_name),
                 director=_normalize_cell(row.director_raw),
                 release_year=_parse_int(row.year_raw),
                 quality=_normalize_cell(row.quality_raw),
@@ -363,7 +363,7 @@ def _parse_int(value: Any) -> int | None:
         return None
 
 
-def _parse_date(value: Any) -> date | None:
+def _parse_date(value: Any, source_sheet_name: str | None = None) -> date | None:
     if isinstance(value, datetime):
         return value.date()
     if isinstance(value, date):
@@ -378,6 +378,11 @@ def _parse_date(value: Any) -> date | None:
             return datetime.strptime(normalized, format_text).date()
         except ValueError:
             continue
+    if source_sheet_name and len(source_sheet_name) == 4 and source_sheet_name.isdigit():
+        try:
+            return datetime.strptime(f"{source_sheet_name}/{normalized}", "%Y/%m/%d").date()
+        except ValueError:
+            pass
     return None
 
 

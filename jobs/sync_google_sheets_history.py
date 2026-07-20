@@ -10,7 +10,15 @@ from typing import Any, NamedTuple, Protocol
 from urllib.parse import quote, urlencode
 from urllib.request import Request as UrlRequest
 from urllib.request import urlopen
+from uuid import UUID
 
+from backend.app.config import (
+    GOOGLE_SHEETS_SCOPE,
+    config_value,
+    resolve_postgres_dsn,
+    resolve_service_account_file,
+    resolve_spreadsheet_id,
+)
 from backend.app.db.postgres_repository import PostgresViewingHistoryRepository
 from backend.app.db.repository import ViewingHistoryRepository
 from backend.app.models.domain import ConfirmedViewingHistoryInput
@@ -28,13 +36,12 @@ from backend.app.services.metadata_service import (
     DoubanHttpDetailAdapter,
     DoubanSeleniumDetailAdapter,
 )
-from jobs.import_auto_matched_history import import_auto_matched_rows, resolve_postgres_dsn
+from jobs.import_auto_matched_history import import_auto_matched_rows
 from jobs.import_auto_matched_history import _progress_row_checksum, _progress_source_sheet_name
 
-DEFAULT_SERVICE_ACCOUNT_FILE = ".secrets/google-sheets-service-account.json"
 DEFAULT_SOURCE_NAME = "google-sheets"
 DEFAULT_DETAIL_ADAPTER = "http"
-GOOGLE_SHEETS_SCOPE = "https://www.googleapis.com/auth/spreadsheets"
+SOURCE_RECORD_ID_KEY = "__record_id"
 CONFIRMED_PROGRESS_STATUSES = {
     "auto_matched_persisted",
     "review_confirmed_persisted",
@@ -149,6 +156,13 @@ def replay_confirmed_progress_rows(
     import_service = ViewingHistoryImportService(InMemoryViewingHistoryRawRepository())
     import_result = import_service.import_rows(source_name, rows)
     mapping = import_service.to_viewing_history_candidates()
+    history_ids = {
+        (str(row.get(SOURCE_SHEET_KEY)), int(row.get(SOURCE_ROW_NUMBER_KEY))): _valid_record_id(
+            row.get(SOURCE_RECORD_ID_KEY)
+        )
+        for row in rows
+        if row.get(SOURCE_SHEET_KEY) and isinstance(row.get(SOURCE_ROW_NUMBER_KEY), int)
+    }
     progress_items = _load_progress_items(progress_path)
     confirmed_by_source_row, confirmed_by_checksum, confirmed_conflicts = _confirmed_subject_ids(progress_items)
 
@@ -185,6 +199,7 @@ def replay_confirmed_progress_rows(
                 source_row_checksum=candidate.source_row_checksum,
                 quality=candidate.quality,
                 comment=candidate.comment,
+                history_id=history_ids.get((candidate.source_sheet_name, candidate.source_row_number)),
             )
         )
 
@@ -254,6 +269,12 @@ def _values_to_import_rows(sheet_name: str, values: list[list[Any]]) -> list[dic
         }
         row[SOURCE_SHEET_KEY] = sheet_name
         row[SOURCE_ROW_NUMBER_KEY] = row_number
+        record_id_index = next((index for index, column in enumerate(header) if column == "RecordId"), None)
+        row[SOURCE_RECORD_ID_KEY] = (
+            row_values[record_id_index]
+            if record_id_index is not None and record_id_index < len(row_values)
+            else None
+        )
         rows.append(row)
     return rows
 
@@ -262,6 +283,13 @@ def _canonical_column_name(value: str | None) -> str | None:
     if value is None:
         return None
     return COLUMN_ALIASES.get(value, value)
+
+
+def _valid_record_id(value: Any) -> str | None:
+    try:
+        return str(UUID(str(value).strip())) if value else None
+    except ValueError:
+        return None
 
 
 def _range_name(sheet_name: str, column_range: str) -> str:
@@ -362,66 +390,6 @@ def _write_status(status_writer, message: str) -> None:
         status_writer(message)
 
 
-def resolve_config_value(config_path: str, key: str) -> str | None:
-    return _load_config_value(config_path, key)
-
-
-def resolve_service_account_file(config_path: str) -> str | None:
-    configured = resolve_config_value(config_path, "GOOGLE_SHEETS_SERVICE_ACCOUNT_FILE")
-    if configured:
-        return configured
-    if os.path.exists(DEFAULT_SERVICE_ACCOUNT_FILE):
-        return DEFAULT_SERVICE_ACCOUNT_FILE
-    return None
-
-
-def resolve_spreadsheet_id(config_path: str) -> str | None:
-    secret_id = _spreadsheet_id_from_service_account_file(resolve_service_account_file(config_path))
-    if secret_id:
-        return secret_id
-    configured_id = resolve_config_value(config_path, "GOOGLE_SHEETS_SPREADSHEET_ID")
-    return _extract_spreadsheet_id(configured_id)
-
-
-def _spreadsheet_id_from_service_account_file(path: str | None) -> str | None:
-    if not path or not os.path.exists(path):
-        return None
-    with open(path, encoding="utf-8") as file:
-        payload = json.load(file)
-    for key in ("spreadsheet_id", "google_sheets_spreadsheet_id", "sheet_id"):
-        value = payload.get(key)
-        extracted = _extract_spreadsheet_id(str(value)) if value else None
-        if extracted:
-            return extracted
-    return None
-
-
-def _extract_spreadsheet_id(value: str | None) -> str | None:
-    if not value:
-        return None
-    match = re.search(r"/spreadsheets/d/([^/?#]+)", value)
-    if match:
-        return match.group(1)
-    if re.fullmatch(r"[A-Za-z0-9_-]{25,}", value):
-        return value
-    return None
-
-
-def _load_config_value(config_path: str, key: str) -> str | None:
-    if not os.path.exists(config_path):
-        return None
-    with open(config_path, encoding="utf-8") as file:
-        for raw_line in file:
-            line = raw_line.strip()
-            if not line or line.startswith("#") or "=" not in line:
-                continue
-            name, value = line.split("=", 1)
-            if name.strip() != key:
-                continue
-            return value.strip().strip('"').strip("'") or None
-    return None
-
-
 def main() -> None:
     parser = argparse.ArgumentParser(description="Sync viewing history rows from Google Sheets into PostgreSQL.")
     parser.add_argument("--sheet", action="append", help="Sheet tab name. Repeat for multiple tabs. Defaults to every sheet tab.")
@@ -446,8 +414,8 @@ def main() -> None:
 
     spreadsheet_id = resolve_spreadsheet_id(args.config_path)
     service_account_file = resolve_service_account_file(args.config_path)
-    api_key = resolve_config_value(args.config_path, "GOOGLE_SHEETS_API_KEY")
-    bearer_token = resolve_config_value(args.config_path, "GOOGLE_SHEETS_ACCESS_TOKEN")
+    api_key = config_value(args.config_path, "GOOGLE_SHEETS_API_KEY")
+    bearer_token = config_value(args.config_path, "GOOGLE_SHEETS_ACCESS_TOKEN")
 
     if not spreadsheet_id:
         parser.error(f"GOOGLE_SHEETS_SPREADSHEET_ID is required in {args.config_path}")

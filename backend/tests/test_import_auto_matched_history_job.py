@@ -6,6 +6,7 @@ from unittest.mock import patch
 
 from openpyxl import Workbook
 
+from backend.app.config import resolve_postgres_dsn
 from backend.app.db.sqlite_repository import SQLiteViewingHistoryRepository
 from backend.app.models.domain import DoubanMovieDetail, DoubanSearchResult
 from backend.app.services.import_service import InMemoryViewingHistoryRawRepository, ViewingHistoryImportService
@@ -16,7 +17,6 @@ from jobs.import_auto_matched_history import (
     import_auto_matched_history,
     import_metadata_auto_matches_resumable,
     _replace_with_retries,
-    resolve_postgres_dsn,
     retry_no_year_match_no_matches,
 )
 

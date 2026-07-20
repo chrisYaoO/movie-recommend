@@ -9,6 +9,8 @@ from backend.app.db.repository import (
     PersistedMovie,
     PersistedViewingHistory,
     PersistViewingHistoryResult,
+    SheetSyncTask,
+    ViewingHistoryRow,
 )
 from backend.app.models.domain import ConfirmedViewingHistoryInput, DoubanMovieDetail
 
@@ -82,6 +84,7 @@ class PostgresViewingHistoryRepository:
             self.connection.execute("ALTER TABLE viewing_history ADD COLUMN IF NOT EXISTS source_row_checksum TEXT")
             self.connection.execute("ALTER TABLE viewing_history ADD COLUMN IF NOT EXISTS source_sheet_name TEXT")
             self.connection.execute("ALTER TABLE viewing_history ADD COLUMN IF NOT EXISTS source_row_number INTEGER")
+            self.connection.execute("ALTER TABLE viewing_history ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMPTZ")
             self.connection.execute("ALTER TABLE viewing_history DROP COLUMN IF EXISTS source_row_hash")
             self.connection.execute("ALTER TABLE viewing_history DROP COLUMN IF EXISTS source_file")
             self.connection.execute(
@@ -100,9 +103,18 @@ class PostgresViewingHistoryRepository:
             self.connection.execute("DROP INDEX IF EXISTS idx_viewing_history_source_row")
             self.connection.execute(
                 """
-                CREATE UNIQUE INDEX idx_viewing_history_source_row
+                CREATE INDEX idx_viewing_history_source_row
                 ON viewing_history(source_sheet_name, source_row_number)
                 """
+            )
+            self.connection.execute(
+                """CREATE TABLE IF NOT EXISTS sheet_sync_outbox (
+                       history_id UUID PRIMARY KEY REFERENCES viewing_history(id),
+                       operation TEXT NOT NULL CHECK(operation IN ('upsert', 'delete')),
+                       attempts INTEGER NOT NULL DEFAULT 0,
+                       last_error TEXT,
+                       updated_at TIMESTAMPTZ NOT NULL
+                   )"""
             )
             self.connection.execute(
                 """
@@ -145,66 +157,7 @@ class PostgresViewingHistoryRepository:
                 )
                 """
             )
-            self.connection.execute(
-                """
-                CREATE TABLE IF NOT EXISTS recommendation_sessions (
-                    id UUID PRIMARY KEY,
-                    strategy TEXT NOT NULL,
-                    context_snapshot JSONB NOT NULL DEFAULT '{}'::jsonb,
-                    created_at TIMESTAMPTZ NOT NULL
-                )
-                """
-            )
-            self.connection.execute(
-                """
-                CREATE TABLE IF NOT EXISTS recommendation_items (
-                    id UUID PRIMARY KEY,
-                    session_id UUID NOT NULL REFERENCES recommendation_sessions(id),
-                    movie_id UUID NOT NULL REFERENCES movies(id),
-                    rank INTEGER NOT NULL,
-                    slot_type TEXT NOT NULL,
-                    score NUMERIC NOT NULL,
-                    score_components JSONB NOT NULL DEFAULT '{}'::jsonb,
-                    source_ref TEXT,
-                    source_label TEXT,
-                    processing_status TEXT,
-                    processed_at TIMESTAMPTZ,
-                    created_at TIMESTAMPTZ NOT NULL,
-                    UNIQUE(session_id, rank)
-                )
-                """
-            )
-            self.connection.execute("ALTER TABLE candidate_pool ADD COLUMN IF NOT EXISTS source_label TEXT")
-            self.connection.execute("ALTER TABLE recommendation_items ADD COLUMN IF NOT EXISTS source_ref TEXT")
-            self.connection.execute("ALTER TABLE recommendation_items ADD COLUMN IF NOT EXISTS source_label TEXT")
-            self.connection.execute("ALTER TABLE recommendation_items ADD COLUMN IF NOT EXISTS processing_status TEXT")
-            self.connection.execute("ALTER TABLE recommendation_items ADD COLUMN IF NOT EXISTS processed_at TIMESTAMPTZ")
-            self.connection.execute(
-                """
-                CREATE TABLE IF NOT EXISTS feedback (
-                    id UUID PRIMARY KEY,
-                    session_id UUID NOT NULL REFERENCES recommendation_sessions(id),
-                    item_id UUID NOT NULL REFERENCES recommendation_items(id),
-                    movie_id UUID NOT NULL REFERENCES movies(id),
-                    feedback_type TEXT NOT NULL,
-                    feedback_value NUMERIC NOT NULL,
-                    comment TEXT,
-                    created_at TIMESTAMPTZ NOT NULL
-                )
-                """
-            )
-            self.connection.execute(
-                """
-                CREATE TABLE IF NOT EXISTS wishlist (
-                    id UUID PRIMARY KEY,
-                    movie_id UUID NOT NULL REFERENCES movies(id),
-                    source_session_id UUID NOT NULL REFERENCES recommendation_sessions(id),
-                    status TEXT NOT NULL,
-                    created_at TIMESTAMPTZ NOT NULL,
-                    closed_at TIMESTAMPTZ
-                )
-                """
-            )
+            initialize_interaction_schema(self.connection)
 
     def persist_confirmed_viewing_history(
         self,
@@ -242,6 +195,7 @@ class PostgresViewingHistoryRepository:
             SELECT m.id, m.douban_subject_id, m.title, MIN(vh.created_at) AS first_watched_created_at
             FROM viewing_history vh
             JOIN movies m ON m.douban_subject_id = vh.douban_subject_id
+            WHERE vh.deleted_at IS NULL
             GROUP BY m.id, m.douban_subject_id, m.title
             ORDER BY first_watched_created_at, m.douban_subject_id
         """
@@ -264,7 +218,7 @@ class PostgresViewingHistoryRepository:
             SELECT vh.douban_subject_id, MIN(vh.created_at) AS first_watched_created_at
             FROM viewing_history vh
             LEFT JOIN movies m ON m.douban_subject_id = vh.douban_subject_id
-            WHERE m.id IS NULL
+            WHERE m.id IS NULL AND vh.deleted_at IS NULL
             GROUP BY vh.douban_subject_id
             ORDER BY first_watched_created_at, vh.douban_subject_id
         """
@@ -297,6 +251,7 @@ class PostgresViewingHistoryRepository:
                 SELECT m.id, m.douban_subject_id, m.title, MIN(vh.created_at) AS first_watched_created_at
                 FROM viewing_history vh
                 JOIN movies m ON m.douban_subject_id = vh.douban_subject_id
+                WHERE vh.deleted_at IS NULL
                 GROUP BY m.id, m.douban_subject_id, m.title
             ) watched
             LEFT JOIN history_recommendation_discovery discovery
@@ -327,6 +282,7 @@ class PostgresViewingHistoryRepository:
                 SELECT m.douban_subject_id
                 FROM viewing_history vh
                 JOIN movies m ON m.douban_subject_id = vh.douban_subject_id
+                WHERE vh.deleted_at IS NULL
                 GROUP BY m.id, m.douban_subject_id
             ) watched
             LEFT JOIN history_recommendation_discovery discovery
@@ -435,11 +391,7 @@ class PostgresViewingHistoryRepository:
         if not confirmed.source_row_checksum:
             raise ValueError("source_row_checksum is required when raw viewing history is not persisted")
 
-        existing = self.connection.execute(
-            "SELECT id FROM viewing_history WHERE source_sheet_name = %s AND source_row_number = %s",
-            (confirmed.source_sheet_name, confirmed.source_row_number),
-        ).fetchone()
-        history_id = str(existing["id"]) if existing is not None else str(uuid4())
+        history_id = confirmed.history_id or str(uuid4())
         now = datetime.now(timezone.utc)
 
         self.connection.execute(
@@ -449,7 +401,7 @@ class PostgresViewingHistoryRepository:
                 source_row_checksum, source_sheet_name, source_row_number, created_at, updated_at
             )
             VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-            ON CONFLICT(source_sheet_name, source_row_number) DO UPDATE SET
+            ON CONFLICT(id) DO UPDATE SET
                 movie_id = excluded.movie_id,
                 douban_subject_id = excluded.douban_subject_id,
                 watched_date = excluded.watched_date,
@@ -457,6 +409,8 @@ class PostgresViewingHistoryRepository:
                 quality = excluded.quality,
                 comment = excluded.comment,
                 source_row_checksum = excluded.source_row_checksum,
+                source_sheet_name = excluded.source_sheet_name,
+                source_row_number = excluded.source_row_number,
                 updated_at = excluded.updated_at
             """,
             (
@@ -479,6 +433,216 @@ class PostgresViewingHistoryRepository:
             douban_subject_id=confirmed.douban_subject_id,
             movie_id=movie_id,
             source_row_checksum=confirmed.source_row_checksum,
+        )
+
+    def save_viewing_history_and_enqueue(
+        self,
+        confirmed: ConfirmedViewingHistoryInput,
+        movie_id: str | None = None,
+    ) -> PersistedViewingHistory:
+        with self.connection.transaction():
+            history = self.upsert_viewing_history(confirmed, movie_id)
+            self._enqueue_sheet_sync(history.id, "upsert")
+        return history
+
+    def update_viewing_history_and_enqueue(
+        self,
+        history_id: str,
+        watched_date,
+        user_rating: float,
+        quality: str | None,
+        comment: str | None,
+        source_row_checksum: str,
+    ) -> bool:
+        now = datetime.now(timezone.utc)
+        with self.connection.transaction():
+            cursor = self.connection.execute(
+                """UPDATE viewing_history
+                   SET watched_date = %s, user_rating = %s, quality = %s, comment = %s,
+                       source_row_checksum = %s, updated_at = %s
+                   WHERE id = %s AND deleted_at IS NULL""",
+                (watched_date, user_rating, quality, comment, source_row_checksum, now, history_id),
+            )
+            if not cursor.rowcount:
+                return False
+            self._enqueue_sheet_sync(history_id, "upsert", now)
+        return True
+
+    def soft_delete_viewing_history_and_enqueue(self, history_id: str) -> bool:
+        now = datetime.now(timezone.utc)
+        with self.connection.transaction():
+            cursor = self.connection.execute(
+                """UPDATE viewing_history
+                   SET deleted_at = COALESCE(deleted_at, %s), updated_at = %s WHERE id = %s""",
+                (now, now, history_id),
+            )
+            if not cursor.rowcount:
+                return False
+            self._enqueue_sheet_sync(history_id, "delete", now)
+        return True
+
+    def find_pending_sheet_sync_tasks(self, limit: int = 50) -> list[SheetSyncTask]:
+        rows = self.connection.execute(
+            """SELECT history_id, operation, attempts, last_error, updated_at
+               FROM sheet_sync_outbox ORDER BY updated_at, history_id LIMIT %s""",
+            (limit,),
+        ).fetchall()
+        return [
+            SheetSyncTask(
+                history_id=str(row["history_id"]), operation=str(row["operation"]),
+                attempts=int(row["attempts"]), last_error=row["last_error"], updated_at=row["updated_at"],
+            )
+            for row in rows
+        ]
+
+    def find_viewing_history(self, history_id: str, include_deleted: bool = False) -> ViewingHistoryRow | None:
+        where = "vh.id = %s" if include_deleted else "vh.id = %s AND vh.deleted_at IS NULL"
+        row = self.connection.execute(self._history_select() + f" WHERE {where}", (history_id,)).fetchone()
+        return self._history_row(row) if row else None
+
+    def find_active_viewing_history(
+        self,
+        limit: int = 50,
+        offset: int = 0,
+        year: int | None = None,
+        descending: bool = True,
+    ) -> list[ViewingHistoryRow]:
+        where = "vh.deleted_at IS NULL"
+        params: list[int] = []
+        if year is not None:
+            where += """ AND COALESCE(
+                EXTRACT(YEAR FROM vh.watched_date)::INTEGER,
+                CASE WHEN vh.source_sheet_name ~ '^[0-9]{4}$' THEN vh.source_sheet_name::INTEGER END
+            ) = %s"""
+            params.append(year)
+        direction = "DESC" if descending else "ASC"
+        rows = self.connection.execute(
+            self._history_select()
+            + f" WHERE {where} ORDER BY (vh.watched_date IS NULL), vh.watched_date {direction}, vh.created_at {direction} LIMIT %s OFFSET %s",
+            (*params, limit, offset),
+        ).fetchall()
+        return [self._history_row(row) for row in rows]
+
+    def count_active_viewing_history(self, year: int | None = None) -> int:
+        where = "deleted_at IS NULL"
+        params: tuple[int, ...] = ()
+        if year is not None:
+            where += """ AND COALESCE(
+                EXTRACT(YEAR FROM watched_date)::INTEGER,
+                CASE WHEN source_sheet_name ~ '^[0-9]{4}$' THEN source_sheet_name::INTEGER END
+            ) = %s"""
+            params = (year,)
+        row = self.connection.execute(
+            f"SELECT COUNT(*) AS count FROM viewing_history WHERE {where}",
+            params,
+        ).fetchone()
+        return int(row["count"])
+
+    def find_active_viewing_history_years(self) -> list[int]:
+        rows = self.connection.execute(
+            """SELECT DISTINCT watched_year AS year
+               FROM (
+                   SELECT COALESCE(
+                       EXTRACT(YEAR FROM watched_date)::INTEGER,
+                       CASE WHEN source_sheet_name ~ '^[0-9]{4}$' THEN source_sheet_name::INTEGER END
+                   ) AS watched_year
+                   FROM viewing_history
+                   WHERE deleted_at IS NULL
+               ) history_years
+               WHERE watched_year IS NOT NULL
+               ORDER BY watched_year DESC"""
+        ).fetchall()
+        return [int(row["year"]) for row in rows]
+
+    def complete_sheet_sync(
+        self,
+        history_id: str,
+        expected_updated_at: datetime | str,
+        sheet_name: str | None = None,
+        row_number: int | None = None,
+    ) -> None:
+        with self.connection.transaction():
+            if sheet_name is not None and row_number is not None:
+                self.connection.execute(
+                    "UPDATE viewing_history SET source_sheet_name = %s, source_row_number = %s, updated_at = %s WHERE id = %s",
+                    (sheet_name, row_number, datetime.now(timezone.utc), history_id),
+                )
+            self.connection.execute(
+                "DELETE FROM sheet_sync_outbox WHERE history_id = %s AND updated_at = %s",
+                (history_id, expected_updated_at),
+            )
+
+    def fail_sheet_sync(self, history_id: str, expected_updated_at: datetime | str, error: str) -> None:
+        self.connection.execute(
+            """UPDATE sheet_sync_outbox SET attempts = attempts + 1, last_error = %s, updated_at = %s
+               WHERE history_id = %s AND updated_at = %s""",
+            (error[:500], datetime.now(timezone.utc), history_id, expected_updated_at),
+        )
+
+    def retry_sheet_sync(self, history_id: str) -> bool:
+        cursor = self.connection.execute(
+            "UPDATE sheet_sync_outbox SET attempts = 0, last_error = NULL, updated_at = %s WHERE history_id = %s",
+            (datetime.now(timezone.utc), history_id),
+        )
+        return bool(cursor.rowcount)
+
+    def sheet_sync_health(self) -> dict[str, int | str | None]:
+        row = self.connection.execute(
+            """SELECT COUNT(*) AS pending_count,
+                      COUNT(*) FILTER (WHERE attempts > 0) AS failed_count,
+                      MAX(last_error) AS last_error
+               FROM sheet_sync_outbox"""
+        ).fetchone()
+        return {
+            "pending_count": int(row["pending_count"]),
+            "failed_count": int(row["failed_count"]),
+            "last_error": row["last_error"],
+        }
+
+    @staticmethod
+    def _history_select() -> str:
+        return """
+            SELECT vh.id, vh.movie_id, vh.douban_subject_id, COALESCE(m.title, '') AS title,
+                   m.year, COALESCE(m.directors, '[]'::jsonb) AS directors, m.poster_url,
+                   vh.watched_date, vh.user_rating, vh.quality, vh.comment,
+                   vh.source_row_checksum, vh.source_sheet_name, vh.source_row_number, vh.deleted_at,
+                   outbox.operation AS sync_operation, COALESCE(outbox.attempts, 0) AS sync_attempts,
+                   outbox.last_error AS sync_error
+            FROM viewing_history vh
+            LEFT JOIN movies m ON m.id = vh.movie_id
+            LEFT JOIN sheet_sync_outbox outbox ON outbox.history_id = vh.id
+        """
+
+    @staticmethod
+    def _history_row(row) -> ViewingHistoryRow:
+        return ViewingHistoryRow(
+            id=str(row["id"]),
+            movie_id=str(row["movie_id"]) if row["movie_id"] is not None else None,
+            douban_subject_id=str(row["douban_subject_id"]),
+            title=str(row["title"]),
+            year=int(row["year"]) if row["year"] is not None else None,
+            directors=tuple(str(value) for value in row["directors"]),
+            poster_url=str(row["poster_url"]) if row["poster_url"] is not None else None,
+            watched_date=row["watched_date"],
+            user_rating=float(row["user_rating"]),
+            quality=row["quality"],
+            comment=row["comment"],
+            source_row_checksum=str(row["source_row_checksum"]),
+            source_sheet_name=str(row["source_sheet_name"]),
+            source_row_number=int(row["source_row_number"]),
+            deleted_at=row["deleted_at"],
+            sync_operation=row["sync_operation"],
+            sync_attempts=int(row["sync_attempts"]),
+            sync_error=row["sync_error"],
+        )
+
+    def _enqueue_sheet_sync(self, history_id: str, operation: str, now=None) -> None:
+        self.connection.execute(
+            """INSERT INTO sheet_sync_outbox(history_id, operation, attempts, last_error, updated_at)
+               VALUES (%s, %s, 0, NULL, %s)
+               ON CONFLICT(history_id) DO UPDATE SET
+                   operation = excluded.operation, attempts = 0, last_error = NULL, updated_at = excluded.updated_at""",
+            (history_id, operation, now or datetime.now(timezone.utc)),
         )
 
     def upsert_candidate_subject(
@@ -526,6 +690,36 @@ class PostgresViewingHistoryRepository:
         if limit is not None:
             sql += " LIMIT %s"
             params = (status, limit)
+        rows = self.connection.execute(sql, params).fetchall()
+        return [
+            CandidateSubjectQueueItem(
+                douban_subject_id=str(row["douban_subject_id"]),
+                source_type=str(row["source_type"]),
+                source_ref=str(row["source_ref"]),
+                source_subject_id=str(row["source_subject_id"]) if row["source_subject_id"] is not None else None,
+                source_label=str(row["source_label"]) if row["source_label"] is not None else None,
+                status=str(row["status"]),
+            )
+            for row in rows
+        ]
+
+    def find_candidate_subjects_by_statuses(
+        self,
+        statuses: tuple[str, ...],
+        limit: int | None = None,
+    ) -> list[CandidateSubjectQueueItem]:
+        if not statuses:
+            return []
+        sql = """
+            SELECT douban_subject_id, source_type, source_ref, source_subject_id, source_label, status
+            FROM candidate_subject_queue
+            WHERE status = ANY(%s)
+            ORDER BY created_at, douban_subject_id
+        """
+        params: tuple[object, ...] = (list(statuses),)
+        if limit is not None:
+            sql += " LIMIT %s"
+            params += (limit,)
         rows = self.connection.execute(sql, params).fetchall()
         return [
             CandidateSubjectQueueItem(
@@ -620,5 +814,68 @@ def _jsonb(value):
     from psycopg.types.json import Jsonb
 
     return Jsonb(value)
+
+
+def initialize_interaction_schema(connection) -> None:
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS recommendation_sessions (
+            id UUID PRIMARY KEY,
+            strategy TEXT NOT NULL,
+            context_snapshot JSONB NOT NULL DEFAULT '{}'::jsonb,
+            created_at TIMESTAMPTZ NOT NULL
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS recommendation_items (
+            id UUID PRIMARY KEY,
+            session_id UUID NOT NULL REFERENCES recommendation_sessions(id),
+            movie_id UUID NOT NULL REFERENCES movies(id),
+            rank INTEGER NOT NULL,
+            slot_type TEXT NOT NULL,
+            score NUMERIC NOT NULL,
+            score_components JSONB NOT NULL DEFAULT '{}'::jsonb,
+            source_ref TEXT,
+            source_label TEXT,
+            processing_status TEXT,
+            processed_at TIMESTAMPTZ,
+            created_at TIMESTAMPTZ NOT NULL,
+            UNIQUE(session_id, rank)
+        )
+        """
+    )
+    connection.execute("ALTER TABLE candidate_pool ADD COLUMN IF NOT EXISTS source_label TEXT")
+    connection.execute("ALTER TABLE recommendation_items ADD COLUMN IF NOT EXISTS source_ref TEXT")
+    connection.execute("ALTER TABLE recommendation_items ADD COLUMN IF NOT EXISTS source_label TEXT")
+    connection.execute("ALTER TABLE recommendation_items ADD COLUMN IF NOT EXISTS processing_status TEXT")
+    connection.execute("ALTER TABLE recommendation_items ADD COLUMN IF NOT EXISTS processed_at TIMESTAMPTZ")
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS feedback (
+            id UUID PRIMARY KEY,
+            session_id UUID NOT NULL REFERENCES recommendation_sessions(id),
+            item_id UUID NOT NULL REFERENCES recommendation_items(id),
+            movie_id UUID NOT NULL REFERENCES movies(id),
+            feedback_type TEXT NOT NULL,
+            feedback_value NUMERIC NOT NULL,
+            comment TEXT,
+            created_at TIMESTAMPTZ NOT NULL
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS wishlist (
+            id UUID PRIMARY KEY,
+            movie_id UUID NOT NULL REFERENCES movies(id),
+            source_session_id UUID NOT NULL REFERENCES recommendation_sessions(id),
+            status TEXT NOT NULL,
+            created_at TIMESTAMPTZ NOT NULL,
+            closed_at TIMESTAMPTZ
+        )
+        """
+    )
 
 

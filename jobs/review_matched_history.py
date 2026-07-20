@@ -10,6 +10,7 @@ import sys
 from typing import Any, Callable
 from uuid import uuid4
 
+from backend.app.config import resolve_postgres_dsn
 from backend.app.db.postgres_repository import PostgresViewingHistoryRepository
 from backend.app.db.repository import ViewingHistoryRepository
 from backend.app.models.domain import ConfirmedViewingHistoryInput, DoubanMovieDetail, ViewingHistoryCandidate
@@ -26,7 +27,7 @@ from backend.app.services.metadata_service import (
     DoubanHttpDetailAdapter,
     DoubanSeleniumDetailAdapter,
 )
-from jobs.import_auto_matched_history import _replace_with_retries, resolve_postgres_dsn
+from jobs.import_auto_matched_history import _replace_with_retries
 
 
 REVIEW_PENDING_STATUS = "needs_review"

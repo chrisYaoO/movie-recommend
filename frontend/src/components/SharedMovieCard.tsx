@@ -1,6 +1,6 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 import type { Movie } from "../types";
-import { formatPersonNames, processingStatusLabel } from "../utils/movie";
+import { processingStatusLabel } from "../utils/movie";
 import { UndoIcon } from "./Icons";
 
 export function SharedMovieCard({
@@ -26,11 +26,8 @@ export function SharedMovieCard({
 }) {
   const [posterFailed, setPosterFailed] = useState(false);
   const [posterLoaded, setPosterLoaded] = useState(false);
-  const directors = useMemo(
-    () => formatPersonNames(movie.directors?.length ? movie.directors : [movie.director]),
-    [movie]
-  );
-  const cast = useMemo(() => formatPersonNames(movie.cast?.length ? movie.cast : movie.main_cast).slice(0, 3).join(", "), [movie]);
+  const directors = movie.directors?.length ? movie.directors : [movie.director];
+  const cast = (movie.cast?.length ? movie.cast : movie.main_cast).slice(0, 3).join(", ");
   const statusText = processedStatus ? processingStatusLabel(processedStatus) : null;
   const showPoster = loadPoster && Boolean(movie.poster_url) && !posterFailed;
   const recommendationSource = recommendationSourceLabel(sourceLabel || badge);
