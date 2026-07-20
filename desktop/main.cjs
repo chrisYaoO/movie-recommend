@@ -33,14 +33,6 @@ function configurePosterRequests() {
     }
   );
 
-  if (process.env.MOVIES_DESKTOP_POSTER_SMOKE_MS) {
-    session.defaultSession.webRequest.onCompleted(
-      { urls: ["https://*.doubanio.com/*"] },
-      (details) => {
-        log(`Poster response: ${details.statusCode} ${details.url}`);
-      }
-    );
-  }
 }
 
 function log(message) {
@@ -187,38 +179,6 @@ async function createWindow() {
     startFrontendDevServer();
     await waitForHttp(FRONTEND_DEV_URL);
     await mainWindow.loadURL(FRONTEND_DEV_URL);
-  }
-
-  const smokeExitMs = Number(process.env.MOVIES_DESKTOP_SMOKE_EXIT_MS || 0);
-  if (smokeExitMs > 0) {
-    const smokeText = await mainWindow.webContents.executeJavaScript(
-      "document.body.innerText.trim().slice(0, 200)",
-      true
-    );
-    log(`Smoke DOM text: ${smokeText}`);
-    const posterSmokeMs = Number(process.env.MOVIES_DESKTOP_POSTER_SMOKE_MS || 0);
-    if (posterSmokeMs > 0) {
-      await new Promise((resolve) => setTimeout(resolve, posterSmokeMs));
-      const posterState = await mainWindow.webContents.executeJavaScript(
-        `JSON.stringify(Array.from(document.querySelectorAll("img.poster-image")).reduce(
-          (state, image) => {
-            state.total += 1;
-            if (image.complete && image.naturalWidth > 0) state.loaded += 1;
-            else if (image.complete) state.failed += 1;
-            else state.pending += 1;
-            return state;
-          },
-          { total: 0, loaded: 0, failed: 0, pending: 0 }
-        ))`,
-        true
-      );
-      log(`Poster smoke state: ${posterState}`);
-    }
-    setTimeout(() => {
-      if (mainWindow && !mainWindow.isDestroyed()) {
-        mainWindow.close();
-      }
-    }, smokeExitMs);
   }
 
   mainWindow.on("closed", () => {
