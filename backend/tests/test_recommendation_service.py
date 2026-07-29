@@ -574,6 +574,19 @@ class RecommendationServiceTest(unittest.TestCase):
         self.assertIsNotNone(first_item.processed_at)
         self.assertNotIn(first_item.movie.id, self.repository.candidate_pool)
 
+    def test_mark_watched_movie_closes_active_wishlist_item(self) -> None:
+        session = self.service.recommend("hybrid")
+        first_item = session.items[0]
+        self.service.submit_feedback(
+            session.id,
+            first_item.id,
+            FeedbackRequest(feedback_type=FeedbackType.WANT_TO_WATCH),
+        )
+
+        self.service.mark_watched_movie(first_item.movie.id)
+
+        self.assertEqual([], self.service.to_wishlist_response()["items"])
+
     def test_mark_wishlist_item_watched_from_record_closes_active_wishlist_item(self) -> None:
         session = self.service.recommend("hybrid")
         first_item = session.items[0]

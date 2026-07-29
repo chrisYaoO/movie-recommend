@@ -149,7 +149,9 @@ def record_viewing_history(request: RecordViewingHistoryRequest):
     watched_wishlist_item = None
     warnings: list[str] = []
     try:
-        if result.movie_id:
+        if request.wishlist_id:
+            watched_wishlist_item = service.mark_wishlist_item_watched_from_record(request.wishlist_id, result.movie_id)
+        elif result.movie_id:
             service.mark_watched_movie(result.movie_id)
         if request.session_id and request.recommendation_item_id:
             processed_item = service.mark_watched_from_recommendation(
@@ -157,8 +159,6 @@ def record_viewing_history(request: RecordViewingHistoryRequest):
                 request.recommendation_item_id,
                 result.movie_id,
             )
-        if request.wishlist_id:
-            watched_wishlist_item = service.mark_wishlist_item_watched_from_record(request.wishlist_id, result.movie_id)
     except Exception as exc:
         warnings.append(f"history saved, but related recommendation state was not updated: {exc}")
     response = record_service.to_response(result)

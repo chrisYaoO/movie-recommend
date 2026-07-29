@@ -1166,6 +1166,9 @@ class RecommendationService:
         return self.repository.clear_recommendation_item_processed(session_id, item_id)
 
     def mark_watched_movie(self, movie_id: str) -> None:
+        wishlist_item = self.repository.find_active_wishlist_by_movie(movie_id)
+        if wishlist_item is not None:
+            self.repository.mark_wishlist_watched(wishlist_item)
         self.repository.deactivate_candidate_pool_movie(movie_id)
 
     def restore_candidate_pool_movie_if_eligible(self, movie_id: str) -> None:
