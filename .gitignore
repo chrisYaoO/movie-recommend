@@ -10,6 +10,8 @@ movie-*.json
 *credentials*.json
 data/imports/*
 !data/imports/.gitkeep
+data/audits/
+data/backups/
 data/cache/
 *.sqlite3
 *.db
