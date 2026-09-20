@@ -66,10 +66,12 @@ pip install -r requirements-dev.txt
 ## Run Tests
 
 ```powershell
+$env:MOVIES_RECOMMENDATION_BACKEND="memory"
 .\.venv\Scripts\python.exe -m unittest discover -s backend\tests
+Remove-Item Env:\MOVIES_RECOMMENDATION_BACKEND
 ```
 
-On macOS or Linux, use `.venv/bin/python -m unittest discover -s backend/tests`.
+On macOS or Linux, use `MOVIES_RECOMMENDATION_BACKEND=memory .venv/bin/python -m unittest discover -s backend/tests`. This keeps the unit suite independent of a local PostgreSQL connection.
 Some PostgreSQL integration tests skip unless a test DSN is configured. To run them, create a separate test database and set:
 
 ```powershell
@@ -80,6 +82,21 @@ $env:MOVIES_POSTGRES_DSN="postgresql://user:password@localhost:5432/movies_test"
 ## Run As A Desktop App
 
 The desktop app uses Electron as a native window around the existing React frontend and FastAPI backend. It reuses the local `.venv` backend, so the normal Python setup above is still required.
+
+For a PostgreSQL-backed Windows build, install PostgreSQL locally, create an empty database, and put its connection string and backend selection in the local `.env`:
+
+```text
+MOVIES_RECOMMENDATION_BACKEND=postgres
+MOVIES_POSTGRES_DSN=postgresql://user:password@localhost:5432/movies
+```
+
+Initialize that database before starting the API for the first time:
+
+```powershell
+.\.venv\Scripts\python.exe -m jobs.init_database
+```
+
+The command uses the versioned schema definition in `backend/app/db/postgres_repository.py` and can be run again. `start-app.cmd` and `start-dev.ps1` run it automatically before the API when the PostgreSQL backend is selected. PostgreSQL must already be running. The in-memory development backend skips this step.
 
 Install the desktop dependencies once:
 
@@ -108,6 +125,8 @@ Then double-click `start-app.cmd` from File Explorer, or run:
 ```
 
 The Electron window starts the backend automatically on `127.0.0.1:8000`, loads the built frontend, and shuts down the backend when the app window closes.
+
+For a Windows build with the real Mac dataset, restore a Mac PostgreSQL custom-format backup into a **new, empty Windows-local database**, then point Windows `.env` at that database. Keep the Mac database as the authoritative copy; do not copy PostgreSQL's data directory between operating systems. See [docs/desktop.md](docs/desktop.md#moving-a-mac-database-to-windows-for-testing) for the restore and smoke-check steps.
 
 On macOS, install dependencies with `npm --prefix frontend ci` and `npm --prefix desktop ci`, build with `npm --prefix frontend run build`, then run `npm --prefix desktop start` from the repository root. The local `Movies.app` launcher also starts Homebrew `postgresql@16` before opening the desktop shell. Both paths use `.venv/bin/python`; they still require local PostgreSQL, Chrome, and application configuration. See [docs/mac-codex-build-notes.md](docs/mac-codex-build-notes.md) for the existing Mac setup.
 

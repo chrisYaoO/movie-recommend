@@ -6,9 +6,14 @@ param(
 $ErrorActionPreference = "Stop"
 
 $root = Split-Path -Parent $MyInvocation.MyCommand.Path
+$python = Join-Path $root ".venv\Scripts\python.exe"
 $desktop = Join-Path $root "desktop"
 $electron = Join-Path $desktop "node_modules\electron"
 $frontendDist = Join-Path $root "frontend\dist\index.html"
+
+if (-not (Test-Path -LiteralPath $python)) {
+    throw "Missing virtualenv Python at $python. Create the venv and install requirements first."
+}
 
 if (-not (Test-Path -LiteralPath $electron)) {
     throw "Missing Electron dependencies at $electron. Run: npm --prefix desktop install"
@@ -22,6 +27,16 @@ if (-not (Test-Path -LiteralPath $frontendDist)) {
     } finally {
         Pop-Location
     }
+}
+
+Push-Location -LiteralPath $root
+try {
+    & $python -m jobs.init_database --if-postgres
+    if ($LASTEXITCODE -ne 0) {
+        throw "PostgreSQL schema initialization failed."
+    }
+} finally {
+    Pop-Location
 }
 
 $env:MOVIES_BACKEND_PORT = "$BackendPort"

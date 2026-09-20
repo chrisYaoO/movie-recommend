@@ -6,7 +6,9 @@ The Electron shell turns the existing React and FastAPI application into a local
 
 ## Startup
 
-On Windows, `start-app.cmd` is the File Explorer entrypoint. It calls `start-app.ps1`, which verifies dependencies and the built frontend, then starts `desktop/launch.cjs`. On macOS, run `npm --prefix desktop start` from the repository root, or use the local `Movies.app` launcher, which starts Homebrew `postgresql@16` first. Both desktop paths use the repository's `.venv` Python.
+On Windows, `start-app.cmd` is the File Explorer entrypoint. It calls `start-app.ps1`, which verifies dependencies and the built frontend, initializes the schema when `MOVIES_RECOMMENDATION_BACKEND=postgres`, then starts `desktop/launch.cjs`. `start-dev.ps1` performs the same schema initialization before starting the development backend. On macOS, run `npm --prefix desktop start` from the repository root, or use the local `Movies.app` launcher, which starts Homebrew `postgresql@16` first. Both desktop paths use the repository's `.venv` Python.
+
+The schema source is `PostgresViewingHistoryRepository.initialize_schema()` in `backend/app/db/postgres_repository.py`. Run `.\.venv\Scripts\python.exe -m jobs.init_database` to initialize a Windows-local database explicitly. It uses `--dsn`, `MOVIES_POSTGRES_DSN`, or `.env` in that order and is safe to repeat on the current schema. The initializer applies the repository's existing legacy migrations; it does not provide a full comparison against a separately versioned SQL snapshot.
 
 The runtime starts these tasks in parallel:
 
@@ -66,6 +68,34 @@ $env:MOVIES_RECORD_CHROME_BINARY_PATH="C:\path\to\chrome.exe"
 .\start-app.cmd
 ```
 
+## Moving a Mac database to Windows for testing
+
+First verify a Windows build against an empty local test database. Set its DSN and `MOVIES_RECOMMENDATION_BACKEND=postgres`, run `.\.venv\Scripts\python.exe -m jobs.init_database` twice, then start the API and request `/openapi.json` and `/wishlist`. Both requests should return HTTP 200. This checks repeatable initialization and an application read path without requiring Google Sheets credentials.
+
+After the Windows app builds successfully, use PostgreSQL backup and restore for real-data testing. On the Mac, use a PostgreSQL client compatible with the server and export the authoritative database in custom format (set `MOVIES_POSTGRES_DSN` in the shell from the local configuration without checking credentials into Git):
+
+```bash
+mkdir -p data/backups
+pg_dump --format=custom --no-owner --no-privileges --file=data/backups/movies-mac.dump "$MOVIES_POSTGRES_DSN"
+```
+
+Transfer the dump file securely. On Windows, create a **new empty** database with a distinct name, then restore into it. Run `createdb` and `pg_restore` as the same PostgreSQL role that the Windows app will use; the example assumes that role can create databases:
+
+```powershell
+createdb movies_windows_test
+pg_restore --no-owner --no-privileges --dbname=movies_windows_test .\data\backups\movies-mac.dump
+psql --dbname=movies_windows_test -c "SELECT (SELECT COUNT(*) FROM movies) AS movies, (SELECT COUNT(*) FROM viewing_history) AS viewing_history"
+```
+
+Compare the restored row counts with the Mac source. Set Windows `.env` to `MOVIES_RECOMMENDATION_BACKEND=postgres` and `MOVIES_POSTGRES_DSN` for `movies_windows_test`. Run the initializer and start the API before opening Electron:
+
+```powershell
+.\.venv\Scripts\python.exe -m jobs.init_database
+.\.venv\Scripts\python.exe -m uvicorn backend.app.main:app --host 127.0.0.1 --port 8000
+```
+
+In a second PowerShell window, request `http://127.0.0.1:8000/openapi.json` and `http://127.0.0.1:8000/wishlist`; both should return HTTP 200. Stop the API, then launch `start-app.cmd` and exercise the desktop UI. Viewing-history endpoints also need the existing Google Sheets spreadsheet ID and service-account file. If those credentials are present, API startup can flush pending outbox entries to that Sheet, so use a test Sheet or review pending tasks before a real-data test. A restored backup is a snapshot: changes made on Windows do not flow back to the Mac database. Keep the dump outside the repository or under ignored `data/backups/`; do not commit it.
+
 ## Verification
 
 ```powershell
@@ -77,5 +107,9 @@ Push-Location frontend
 npm run build
 Pop-Location
 
+$env:MOVIES_RECOMMENDATION_BACKEND="memory"
 .\.venv\Scripts\python.exe -m unittest discover -s backend\tests
+Remove-Item Env:\MOVIES_RECOMMENDATION_BACKEND
 ```
+
+The unit suite uses the in-memory backend even when local `.env` selects PostgreSQL. PostgreSQL integration tests use a separate test DSN as described in the README.

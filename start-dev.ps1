@@ -19,6 +19,16 @@ if (-not (Test-Path -LiteralPath $nodeModules)) {
     throw "Missing frontend dependencies at $nodeModules. Run: npm --prefix frontend install"
 }
 
+Push-Location -LiteralPath $root
+try {
+    & $python -m jobs.init_database --if-postgres
+    if ($LASTEXITCODE -ne 0) {
+        throw "PostgreSQL schema initialization failed."
+    }
+} finally {
+    Pop-Location
+}
+
 $backendCommand = @"
 Set-Location -LiteralPath '$root'
 & '$python' -m uvicorn backend.app.main:app --reload --host 127.0.0.1 --port $BackendPort

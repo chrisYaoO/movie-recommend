@@ -61,7 +61,8 @@ Douban list/search/similar-source import
 The desktop interactive path is:
 
 ```text
-start-app.cmd (Windows) or npm --prefix desktop start / Movies.app (macOS)
+start-app.cmd (Windows; initialize PostgreSQL schema first when selected)
+or npm --prefix desktop start / Movies.app (macOS)
 -> Electron window + FastAPI backend in parallel
 -> frontend waits for backend through preload IPC only when making API calls
 -> background Selenium prewarm for missing watched-movie metadata
@@ -105,7 +106,7 @@ movies/
 
 ## PostgreSQL Schema
 
-The table summaries below reflect the schema created by `backend/app/db/postgres_repository.py`. Legacy import and matching structures belong to the older workbook workflow and are described separately from the active runtime tables.
+The table summaries below reflect the schema created by `PostgresViewingHistoryRepository.initialize_schema()` in `backend/app/db/postgres_repository.py`. `python -m jobs.init_database` invokes that versioned code before a Windows PostgreSQL-backed app starts; `start-app.ps1` and `start-dev.ps1` call it automatically. There is no separate `schema.sql` or complete drift checker. Legacy import and matching structures belong to the older workbook workflow and are described separately from the active runtime tables.
 
 ### movies
 
