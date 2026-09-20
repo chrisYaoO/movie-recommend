@@ -70,6 +70,8 @@ $env:MOVIES_RECORD_CHROME_BINARY_PATH="C:\path\to\chrome.exe"
 
 ## Moving a Mac database to Windows for testing
 
+For the full Windows native-dependency rebuild, schema audit, current Mac backup restore, and acceptance sequence, see [the Windows local build checklist](checklists/windows-local-build-checklist.md).
+
 First verify a Windows build against an empty local test database. Set its DSN and `MOVIES_RECOMMENDATION_BACKEND=postgres`, run `.\.venv\Scripts\python.exe -m jobs.init_database` twice, then start the API and request `/openapi.json` and `/wishlist`. Both requests should return HTTP 200. This checks repeatable initialization and an application read path without requiring Google Sheets credentials.
 
 After the Windows app builds successfully, use PostgreSQL backup and restore for real-data testing. On the Mac, use a PostgreSQL client compatible with the server and export the authoritative database in custom format (set `MOVIES_POSTGRES_DSN` in the shell from the local configuration without checking credentials into Git):
