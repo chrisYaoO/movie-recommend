@@ -11,16 +11,17 @@ The current application is a local Electron desktop app backed by React, FastAPI
 Implemented workflows:
 
 - request eight recommendations: four exploit and four explore
+- choose `hybrid` or `bandit_hybrid` in the UI (the default remains `hybrid`); the API also supports `popularity` and `content`
 - record want-to-watch, maybe-later, and not-interested feedback
 - manage wishlist and not-interested state
 - search for a movie and record it as watched
 - browse, edit, and remove viewing-history records
-- persist watched records locally and synchronize them to Google Sheets
+- persist watched records in PostgreSQL with a retryable Google Sheets sync outbox
 - synchronously create missing canonical watched movies
 - build and enrich a resumable local recommendation candidate pool
-- run the same UI in a browser during development or in an Electron desktop window
+- run the same UI in a browser during development or in an Electron desktop window on Windows or macOS
 
-Live recommendation reads local PostgreSQL data only. The only synchronous external calls in the interactive workflow are Google Sheets writes and missing watched-movie metadata retrieval.
+With the PostgreSQL backend selected, recommendation generation reads local data only. Other interactive paths may call Douban for title search or missing watched-movie metadata, and may call Google Sheets to flush viewing-history changes. Poster images load from Douban image hosts.
 
 ## Project Layout
 
@@ -29,8 +30,9 @@ backend/
   app/
     api/             FastAPI routes
     models/          Domain models
-    recommenders/    Baseline scoring logic
-    services/        Application services and in-memory repository
+    recommenders/    Baseline and bandit scoring logic
+    db/              PostgreSQL and SQLite viewing-history repositories
+    services/        Application services and recommendation repositories
   tests/             Backend unit tests
 docs/                Requirements, architecture, and agent workflow docs
 frontend/            React UI for recommendations, search, and recording history
@@ -40,7 +42,15 @@ jobs/                Google Sheets sync, rebuild, enrichment, and evaluation job
 
 ## Setup
 
-Create and activate a virtual environment:
+Create and activate a virtual environment on macOS or Linux:
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install -r requirements-dev.txt
+```
+
+On Windows PowerShell:
 
 ```powershell
 python -m venv .venv
@@ -59,15 +69,8 @@ pip install -r requirements-dev.txt
 .\.venv\Scripts\python.exe -m unittest discover -s backend\tests
 ```
 
-Current expected result:
-
-```text
-Ran 172 tests
-
-OK (skipped=3)
-```
-
-The skipped tests are optional PostgreSQL integration tests. To run them, install PostgreSQL, create a test database, and set:
+On macOS or Linux, use `.venv/bin/python -m unittest discover -s backend/tests`.
+Some PostgreSQL integration tests skip unless a test DSN is configured. To run them, create a separate test database and set:
 
 ```powershell
 $env:MOVIES_POSTGRES_DSN="postgresql://user:password@localhost:5432/movies_test"
@@ -106,6 +109,8 @@ Then double-click `start-app.cmd` from File Explorer, or run:
 
 The Electron window starts the backend automatically on `127.0.0.1:8000`, loads the built frontend, and shuts down the backend when the app window closes.
 
+On macOS, install dependencies with `npm --prefix frontend ci` and `npm --prefix desktop ci`, build with `npm --prefix frontend run build`, then run `npm --prefix desktop start` from the repository root. The local `Movies.app` launcher also starts Homebrew `postgresql@16` before opening the desktop shell. Both paths use `.venv/bin/python`; they still require local PostgreSQL, Chrome, and application configuration. See [docs/mac-codex-build-notes.md](docs/mac-codex-build-notes.md) for the existing Mac setup.
+
 Desktop mode also prewarms the shared headless Selenium driver in the background so the first Add watched submission for a missing canonical movie does not pay the Chrome startup cost. To disable that behavior for a run:
 
 ```powershell
@@ -117,7 +122,7 @@ See [docs/desktop.md](docs/desktop.md) for lifecycle behavior, performance notes
 
 ## Import And Rebuild Viewing History
 
-The current rebuild path treats Google Sheets as the source of truth for viewing history. Local `.xlsx` files are legacy snapshots unless explicitly needed for older review workflows.
+The historical rebuild path reads Google Sheets and the confirmed progress file. In the running application, PostgreSQL is the source of truth and Google Sheets is a one-way projection. Local `.xlsx` files are legacy snapshots unless explicitly needed for older review workflows.
 
 The CLI reads PostgreSQL connection settings from `--dsn`, `MOVIES_POSTGRES_DSN`, or local `.env`, in that order. A local `.env` should contain:
 
@@ -279,18 +284,23 @@ The backend loads `.env` automatically at startup, while real process environmen
 
 Useful endpoints in the current slice:
 
+- `GET /candidate-queue/status`
+- `POST /candidate-queue/process`
 - `GET /movies/search?q=Still%20Walking`
 - `POST /viewing-history`
 - `GET /viewing-history?year=2026&limit=50&offset=0&order=desc`
 - `PATCH /viewing-history/{history_id}`
 - `DELETE /viewing-history/{history_id}`
 - `POST /viewing-history/{history_id}/sync`
+- `GET /viewing-history-sync/status`
 - `GET /recommendations?strategy=hybrid`
+- `GET /recommendations?strategy=bandit_hybrid`
 - `GET /recommendations?strategy=hybrid&seed=42`
 - `GET /recommendations?strategy=popularity`
 - `GET /recommendations?strategy=content`
 - `GET /recommendations/{session_id}`
 - `POST /recommendations/{session_id}/items/{item_id}/feedback`
+- `DELETE /recommendations/{session_id}/items/{item_id}/processing`
 - `GET /wishlist`
 - `POST /wishlist/{wishlist_id}/watched`
 - `DELETE /wishlist/{wishlist_id}`
@@ -323,7 +333,7 @@ npm --prefix frontend install
 npm --prefix frontend run dev
 ```
 
-The dev server proxies API requests to `http://127.0.0.1:8000`, so the browser should use the Vite URL printed by `npm run dev`, usually `http://127.0.0.1:5173/`.
+The dev server proxies `/movies`, `/viewing-history`, `/recommendations`, `/wishlist`, and `/not-interested` to `http://127.0.0.1:8000`. Its current proxy does not include `/candidate-queue`; the browser queue control needs `VITE_API_BASE_URL=http://127.0.0.1:8000` or a proxy update. Use the Vite URL printed by `npm run dev`, usually `http://127.0.0.1:5173/`.
 
 To start both the API and frontend in separate PowerShell windows:
 
@@ -336,7 +346,7 @@ file may open it in an editor instead of running it.
 
 ## Recommendation Scoring
 
-The current baseline scoring rules live in `backend/app/recommenders/simple.py`.
+The baseline scoring rules live in `backend/app/recommenders/simple.py`. `backend/app/recommenders/bandit.py` implements the optional learning strategy.
 
 The implementation provides:
 
@@ -346,6 +356,8 @@ The implementation provides:
 - `diversity_gain`: batch-local diversity for the four explore slots.
 
 See [docs/architecture.md](docs/architecture.md#recommendation-strategy) for the exact formulas and the 4 exploit / 4 explore selection rule.
+
+`bandit_hybrid` keeps the four hybrid exploit slots and uses diagonal Linear Thompson Sampling for exploration after at least 20 trainable examples. Before that threshold, or if training fails, it uses the hybrid explore selector. The UI lets users select either strategy and remembers the choice locally; a fresh install starts with `hybrid`.
 
 To inspect recommendation output quality against PostgreSQL data, run:
 
@@ -357,6 +369,7 @@ To make explore-slot randomness reproducible while evaluating, pass a seed:
 
 ```powershell
 .\.venv\Scripts\python.exe -m jobs.evaluate_recommendations --strategy hybrid --runs 10 --seed 42
+.\.venv\Scripts\python.exe -m jobs.evaluate_recommendations --strategy bandit_hybrid --runs 10 --seed 42
 ```
 
 The report prints:
@@ -364,6 +377,7 @@ The report prints:
 - `candidate_pool_health`: active pool size, recommendation-eligible size, queue status counts, active source mix, and missing metadata counts.
 - recommendation runs: each returned item with slot type, score, rating, watched flag, and pool source.
 - `summary`: unique movies, slot mix, source mix, repeated movies, duplicate items within a session, and watched-movie leakage.
+- for `bandit_hybrid`: trainable-example count, bandit use/fallback counts, and fallback reasons.
 
 Use this as the daily check after each candidate-pool batch. The first hard gates are `watched_leak_count=0`, `duplicate_in_session_count=0`, and `eligible_unique_movies >= 5`; after the pool grows, watch whether `repeated_movies` and `active_source_mix` show over-concentration.
 
@@ -372,8 +386,8 @@ Use this as the daily check after each candidate-pool batch. The first hard gate
 - [CONTEXT.md](CONTEXT.md): product boundaries and domain decisions
 - [docs/requirements.md](docs/requirements.md): current functional requirements
 - [docs/architecture.md](docs/architecture.md): data flow, persistence, APIs, and recommendation mechanics
-- [docs/contextual-bandit-design.md](docs/contextual-bandit-design.md): planned `bandit_hybrid` strategy, Linear Thompson Sampling design, and reward rules
-- [docs/checklists/contextual-bandit-implementation-checklist.md](docs/checklists/contextual-bandit-implementation-checklist.md): backend implementation checklist for `bandit_hybrid`
+- [docs/contextual-bandit-design.md](docs/contextual-bandit-design.md): `bandit_hybrid` strategy, Linear Thompson Sampling design, and reward rules
+- [docs/checklists/contextual-bandit-implementation-checklist.md](docs/checklists/contextual-bandit-implementation-checklist.md): completed backend implementation record for `bandit_hybrid`
 - [docs/desktop.md](docs/desktop.md): Electron runtime and lifecycle
 - [docs/technical-debt.md](docs/technical-debt.md): prioritized correctness, security, and maintainability risks
 - [docs/checklists/frontend-performance-checklist.md](docs/checklists/frontend-performance-checklist.md): completed frontend slices and remaining performance work

@@ -2,20 +2,19 @@
 
 This document records current code-level risks in priority order. It is not a feature wishlist.
 
-## P0: Add Watched Is Not Idempotent Across Google Sheets And PostgreSQL
+## P1: Related Recommendation State Can Lag A Saved Viewing Record
 
-The interactive record path appends Google Sheets first, then writes PostgreSQL and recommendation/wishlist state. If Sheets succeeds and a later local write fails, the API returns an error even though the source-of-truth row already exists. A user retry can append a duplicate Sheets row.
+The Add watched path now saves `viewing_history` and a replacing `sheet_sync_outbox` task in one PostgreSQL transaction. The frontend keeps a `history_id` in its draft, and Sheet upserts use the same UUID in `RecordId`, so retrying a record does not require another blind append. After that save, `routes.py` separately marks wishlist or recommendation items watched and deactivates candidate rows. A failure there returns a warning while the history record remains saved, with no automatic repair of the related state.
 
 Required direction:
 
-- introduce an explicit client-generated operation/idempotency key that survives retries
-- return stage-aware failure information when Sheets succeeded but local persistence failed
-- add a recovery/reconciliation path that completes local persistence without appending another row
-- prevent application shutdown from interrupting an in-flight record operation without warning
+- reconcile saved history with wishlist, recommendation-item, and candidate-pool state after a partial failure
+- define transaction boundaries for those related state changes where they share one PostgreSQL database
+- surface the returned warning in the Add watched UI so users can see incomplete follow-up work
 
 ## P1: Desktop Local API Security Boundary Is Too Broad
 
-The backend accepts the opaque `null` origin for the Electron `file://` frontend, and mutation endpoints have no local authentication token. The Electron window also lacks explicit navigation and new-window restrictions.
+The backend accepts the opaque `null` origin for the Electron `file://` frontend, and mutation endpoints have no local authentication token. Electron opens external HTTP(S) links in the system browser, but its window handler allows other URL schemes and the navigation handler only intercepts external HTTP(S) destinations.
 
 Required direction:
 
@@ -42,19 +41,26 @@ Required direction:
 
 - make PostgreSQL integration tests runnable in one documented command
 - add an Electron smoke test target that proves first paint, backend readiness, poster loading, and process cleanup
-- add a non-writing Google Sheets authentication check
+- make the existing Google Sheets dry-run credential check part of a repeatable integration target
 - add failure-path tests for partial Add watched completion
 
 ## P2: The Frontend Is A Single Large Module
 
-`frontend/src/main.tsx` owns API transport, storage, recommendation state, wishlist state, Add watched state, and all view components. This makes behavior changes risky and leaves no focused frontend test seams.
+`frontend/src/main.tsx` still owns the view components and most workflow state. API transport, shared cards, storage helpers, and pagination hooks have been extracted, but the main module remains large and has no focused frontend test target.
 
 Required direction:
 
-- extract a typed API client
-- extract storage/state hooks by workflow
 - split each main view into a module
 - add focused tests for draft persistence, source-tab return, processed-card state, and failure handling
+
+## P2: Browser Dev Proxy Omits Candidate Queue
+
+`frontend/vite.config.ts` proxies the main API paths but not `/candidate-queue`. The queue control calls that path through the shared API client, so it cannot reach FastAPI through the default Vite origin without an explicit `VITE_API_BASE_URL`.
+
+Required direction:
+
+- proxy `/candidate-queue` in browser development, or set a documented API base URL for that mode
+- add a small browser development smoke check for the queue status control
 
 ## P2: Desktop Delivery Is Still A Developer Launcher
 

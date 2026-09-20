@@ -6,12 +6,12 @@ The Electron shell turns the existing React and FastAPI application into a local
 
 ## Startup
 
-`start-app.cmd` is the File Explorer entrypoint. It calls `start-app.ps1`, which verifies dependencies and the built frontend, then starts `desktop/launch.cjs`.
+On Windows, `start-app.cmd` is the File Explorer entrypoint. It calls `start-app.ps1`, which verifies dependencies and the built frontend, then starts `desktop/launch.cjs`. On macOS, run `npm --prefix desktop start` from the repository root, or use the local `Movies.app` launcher, which starts Homebrew `postgresql@16` first. Both desktop paths use the repository's `.venv` Python.
 
 The runtime starts these tasks in parallel:
 
-1. Electron creates the application window and loads `frontend/dist/index.html`.
-2. Electron starts `.venv\Scripts\python.exe -m uvicorn backend.app.main:app`.
+1. Electron creates the application window and loads `frontend/dist/index.html`, or starts Vite when the built frontend is absent.
+2. Electron starts `.venv/Scripts/python.exe` on Windows or `.venv/bin/python` on macOS with `-m uvicorn backend.app.main:app`.
 3. Frontend API calls wait through the preload IPC bridge until the backend health check succeeds.
 4. In desktop mode, FastAPI starts a background Selenium prewarm thread.
 
@@ -22,9 +22,9 @@ The window can render before FastAPI and Selenium are ready. This keeps first pa
 Closing the application window:
 
 1. stops the frontend development server when one was used
-2. terminates the FastAPI process tree
+2. stops FastAPI (`taskkill /T /F` on Windows, `SIGTERM` to the child on macOS)
 3. runs FastAPI lifespan cleanup when graceful shutdown is available
-4. closes the shared Selenium driver and PostgreSQL viewing-history connection
+4. closes the shared Selenium driver, candidate-queue worker, and PostgreSQL viewing-history connection
 
 Desktop lifecycle smoke checks should verify that Electron, uvicorn, chromedriver, and headless Chrome leave no residual processes.
 
@@ -40,7 +40,7 @@ The React UI keeps stable poster dimensions and shows separate loading and faile
 
 ## Performance
 
-Measured on the current local dataset and machine:
+Measured during the July 2026 local build on its dataset and machine:
 
 - React first paint: about 1.5 to 1.8 seconds
 - backend readiness: about 2.3 seconds

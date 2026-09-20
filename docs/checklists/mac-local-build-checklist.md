@@ -2,6 +2,8 @@
 
 Purpose: make the copied Windows project run locally on this Apple Silicon Mac with the data from `movies-postgres-export-20260712-183619.sql`.
 
+This is a July 2026 migration record. Its Sheet-first Add watched notes predate the later PostgreSQL-first outbox cutover, and the repository now has a local `Movies.app` launcher. Use `README.md` and `docs/desktop.md` for current operation.
+
 This checklist builds a local development-style Electron application. It does **not** package a distributable `.app` or installer; the repository does not currently contain Electron packaging configuration.
 
 Status legend: `[ ]` not started, `[~]` in progress, `[x]` verified during planning, `[?]` requires a decision or explicit approval.

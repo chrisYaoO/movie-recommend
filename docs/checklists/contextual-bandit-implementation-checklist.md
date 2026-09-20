@@ -1,7 +1,7 @@
 # Contextual Bandit Implementation Checklist
 
-This checklist tracks the backend-only implementation of `bandit_hybrid`.
-Do not change the frontend default recommendation entry point in this phase.
+This checklist records the completed backend implementation of `bandit_hybrid`.
+The frontend later added an explicit strategy selector while retaining `hybrid` as the fresh-client default.
 
 ## Phase 0: Documentation And Contract
 

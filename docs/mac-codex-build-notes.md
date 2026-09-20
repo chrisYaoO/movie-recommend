@@ -1,6 +1,6 @@
 # Mac Codex Build Notes
 
-This note is for a Codex agent continuing this repository on macOS after the full Windows folder is copied over.
+This note records the July 2026 macOS migration and the current local launch path. Dated verification counts and migration caveats below describe that build, not a fresh audit.
 
 The first macOS local build was completed and verified on 2026-07-17. The authoritative execution record is [the macOS local build checklist](checklists/mac-local-build-checklist.md).
 
@@ -23,7 +23,7 @@ This is not a self-contained packaged desktop app yet. It is a local desktop she
 - Electron shell in `desktop/`
 - FastAPI backend in `backend/`
 - PostgreSQL as the local application database
-- Google Sheets as the viewing-history source of truth for watched-record writes
+- PostgreSQL as the viewing-history system of record, with Google Sheets as a one-way projection
 - Douban cache/import files under `data/`
 
 The platform-specific Python and Chrome paths are now handled in code. A future copy to another Mac must still recreate generated runtime folders rather than reuse Windows artifacts.
@@ -126,7 +126,7 @@ The desktop Python path is platform-aware through `desktop/runtime-paths.cjs`: W
 
 The process-kill path already has a Windows branch and falls back to `SIGTERM` on non-Windows. The frontend dev-server command is also already platform-aware for `npm.cmd` vs `npm`.
 
-There is no packaged macOS launcher. Launch manually from the repository root:
+There is a local `Movies.app` launcher that starts Homebrew `postgresql@16` and then runs the Electron shell from this repository. It is still not a self-contained distributable app. The equivalent manual launch from the repository root is:
 
 ```bash
 npm --prefix desktop start
@@ -152,7 +152,7 @@ Open the Vite URL, usually `http://127.0.0.1:5173`.
 
 ## Google Sheets Credentials
 
-Watched-record writes append to Google Sheets before local PostgreSQL persistence. Keep `.secrets/google-sheets-service-account.json` available on macOS.
+Watched-record writes commit to PostgreSQL with a Sheet-sync outbox task, then attempt an immediate Google Sheets update. Failed syncs remain retryable. Keep `.secrets/google-sheets-service-account.json` available on macOS.
 
 Verify:
 
@@ -174,7 +174,7 @@ python -m jobs.sync_google_sheets_history --replay-confirmed-progress --dry-run
 
 `data/cache/` contains Douban search/detail cache and auto-match progress. It helps avoid re-fetching and preserves matching context, but it is not the primary application database.
 
-`data/imports/MOVIES.xlsx` is a legacy/import input. The current rebuild path treats Google Sheets as the source of truth for viewing history unless the user explicitly says to use local Excel snapshots.
+`data/imports/MOVIES.xlsx` is a legacy/import input. A historical rebuild can read Google Sheets plus confirmed match progress; normal runtime history is authoritative in PostgreSQL.
 
 `movies-postgres-export-20260712-183619.sql` is the exported current PostgreSQL data snapshot. Prefer this file for Mac migration over rebuilding from Google Sheets unless the user explicitly wants a fresh rebuild.
 
@@ -225,7 +225,7 @@ If recommendations are empty or the app falls back to seed data, check `.env` fi
 
 - PostgreSQL `16.14`, Google Chrome `150.0.7871.129`, and npm `12.0.1` were installed during the build.
 - The pre-smoke restored counts matched the SQL snapshot. The approved Electron smoke then changed recommendation sessions from `70` to `71` and recommendation items from `520` to `528`; feedback, viewing history, and wishlist counts did not change.
-- The end-to-end Add watched test was not run. It permanently appends to Google Sheets before local PostgreSQL persistence and still has a duplicate-write risk if the local step fails. Choose a real test movie explicitly before running it.
+- The July 2026 end-to-end Add watched test was not run. The later PostgreSQL-first outbox cutover changed its write order and retry behavior; a real end-to-end check would still change the database and Sheet.
 - The Google Sheets dry-run and Selenium/Douban read checks passed. `google-auth[requests]` is required because the code uses the Requests transport.
 - npm reported existing dependency vulnerabilities. No `npm audit fix --force` was run because it may introduce breaking upgrades.
 - Replaced Windows runtimes and build artifacts remain recoverable under repository-root `.trash/`. Review them before any later cleanup; do not delete source data or secrets.

@@ -8,7 +8,7 @@ Course-style reinforcement learning recommendation projects are references only.
 
 ## Core Workflow
 
-1. Import the user's existing Excel viewing history.
+1. Rebuild historical viewing history from Google Sheets and confirmed match progress; use Excel for legacy import and repair workflows.
 2. Match imported movies to Douban movie subjects.
 3. Enrich matched movies and candidate movies with metadata.
 4. Store cleaned history, candidates, feedback, and wishlist state in PostgreSQL.
@@ -23,7 +23,7 @@ Course-style reinforcement learning recommendation projects are references only.
 
 ### Data Import
 
-- Import an Excel viewing history file with these columns:
+- Read the historical Google Sheets viewing history. The legacy Excel importer accepts these columns:
   - Date
   - Name
   - Director
@@ -31,9 +31,9 @@ Course-style reinforcement learning recommendation projects are references only.
   - Rating
   - Quality
   - Comment
-- Preserve raw imported rows for auditability.
-- Generate stable row hashes so repeated imports do not duplicate records.
-- Treat Excel as an import source, not the long-term system of record.
+- Preserve source row information and checksums for auditability.
+- Identify runtime viewing events by their PostgreSQL UUID and synchronize that UUID to the Sheet `RecordId` column.
+- Treat PostgreSQL as the runtime system of record; Google Sheets is a one-way projection and Excel is a legacy import source.
 
 ### Douban Matching
 
@@ -164,6 +164,7 @@ MVP frontend pages:
   - click to request eight recommendations
   - show eight movie cards
   - capture want-to-watch, maybe-later, and not-interested feedback
+  - offer `hybrid` and `bandit_hybrid` selection, defaulting to `hybrid` for a fresh client
 - wishlist page
   - list saved movies
   - open Douban URL
@@ -172,7 +173,7 @@ MVP frontend pages:
   - list and clear current negative-interest state
 - Add watched page
   - search by title, Douban subject ID, or Douban URL
-  - append the watched record to Google Sheets and persist it locally
+- persist the watched record and a sync task in PostgreSQL, then attempt Google Sheets synchronization
 
 ### Backend API
 
@@ -186,8 +187,10 @@ Current interactive API capabilities:
 - manage current not-interested state
 - record watched movie
 - list, edit, delete, and retry synchronization for viewing-history records
+- inspect and start background candidate-queue processing
+- inspect viewing-history synchronization health
 
-Import, matching, metadata enrichment, candidate-pool processing, and evaluation remain resumable CLI jobs rather than HTTP admin endpoints.
+Import, matching, bulk metadata enrichment, candidate-pool discovery, and evaluation remain resumable CLI jobs. The application also exposes candidate-queue status and background processing endpoints.
 
 ## Non-Functional Requirements
 
@@ -216,7 +219,7 @@ Import, matching, metadata enrichment, candidate-pool processing, and evaluation
 
 - integrate the user's existing review tool
 - add TMDB/IMDb/Wikidata fallback enrichment
-- add `bandit_hybrid` backend strategy with Linear Thompson Sampling for explore slots, trained from accumulated recommendation feedback
+- evaluate `bandit_hybrid` against the `hybrid` default using accumulated feedback and real-use evidence
 - add RL-style sequential recommendation if enough interaction data exists
 - add richer diversity controls
 - add recommendation explanation/debug panel

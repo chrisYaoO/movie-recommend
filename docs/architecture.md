@@ -2,7 +2,7 @@
 
 ## System Shape
 
-The system has four main parts:
+The system has five main parts:
 
 1. data jobs
    - Google Sheets viewing-history sync
@@ -10,11 +10,11 @@ The system has four main parts:
    - Douban metadata enrichment
    - candidate pool construction
 2. PostgreSQL
-   - system of record for imported history, movies, feedback, wishlist, and recommendation sessions
+   - system of record for viewing history, movies, feedback, wishlist, and recommendation sessions
 3. FastAPI backend
    - recommendation API
    - feedback API
-   - import/matching/admin API
+   - viewing-history management and candidate-queue control APIs
 4. React frontend
    - recommendation workflow
    - wishlist workflow
@@ -27,6 +27,8 @@ The system has four main parts:
    - keeps desktop-only process lifecycle behavior outside the web frontend
 
 Live recommendation must not call Douban. It only reads PostgreSQL.
+
+The active application database runs locally on the Mac. Windows is a build target, not a second synchronized runtime; a future Windows installation with real data requires its own PostgreSQL database restored from backup. See [ADR 0001](adr/0001-local-mac-database-no-cross-device-sync.md).
 
 The Add watched workflow fetches missing canonical watched-movie metadata synchronously, then commits locally. Google Sheets is updated best-effort after the local commit; its availability never determines whether the history mutation succeeds.
 
@@ -59,17 +61,17 @@ Douban list/search/similar-source import
 The desktop interactive path is:
 
 ```text
-start-app.cmd
+start-app.cmd (Windows) or npm --prefix desktop start / Movies.app (macOS)
 -> Electron window + FastAPI backend in parallel
 -> frontend waits for backend through preload IPC only when making API calls
 -> background Selenium prewarm for missing watched-movie metadata
 -> close window
--> stop backend process tree and shared Selenium driver
+-> stop the backend child and close the shared Selenium driver
 ```
 
 ## Module Layout
 
-Suggested repository layout:
+Current repository layout (selected paths):
 
 ```text
 movies/
@@ -82,10 +84,8 @@ movies/
 |   |   |-- api/
 |   |   |-- db/
 |   |   |-- models/
-|   |   |-- schemas/
 |   |   |-- services/
 |   |   `-- recommenders/
-|   |-- alembic/
 |   `-- tests/
 |-- jobs/
 |   |-- sync_google_sheets_history.py
@@ -103,7 +103,9 @@ movies/
     `-- cache/
 ```
 
-## PostgreSQL Schema Draft
+## PostgreSQL Schema
+
+The table summaries below reflect the schema created by `backend/app/db/postgres_repository.py`. Legacy import and matching structures belong to the older workbook workflow and are described separately from the active runtime tables.
 
 ### movies
 
@@ -114,16 +116,14 @@ id uuid primary key
 douban_subject_id text unique
 douban_url text
 title text not null
+aka_titles jsonb
 year integer
 directors jsonb
 actors jsonb
 genres jsonb
 countries jsonb
-languages jsonb
-runtime_minutes integer
 douban_rating numeric
 douban_vote_count integer
-awards jsonb
 summary text
 poster_url text
 raw_douban_json jsonb
@@ -132,9 +132,9 @@ created_at timestamptz
 updated_at timestamptz
 ```
 
-### viewing_history_raw
+### Legacy viewing_history_raw sketch
 
-Legacy raw imported rows. The current rebuild reads Google Sheets directly; local Excel files are historical snapshots only.
+The current PostgreSQL repository does not create this table. Legacy raw imported rows were part of the workbook design; the current rebuild reads Google Sheets directly and local Excel files are historical snapshots only.
 
 ```text
 id uuid primary key
@@ -160,7 +160,7 @@ id uuid primary key
 douban_subject_id text not null
 movie_id uuid references movies(id) -- nullable backfill cache
 watched_date date
-user_rating numeric
+user_rating numeric not null
 quality text
 comment text
 source_sheet_name text
@@ -211,9 +211,9 @@ Progress is stored in `data/cache/viewing-history-record-id-migration.json`; rer
 
 Inspect sync health with `GET /viewing-history-sync/status`. Retry one failed task with `POST /viewing-history/{history_id}/sync`.
 
-### douban_match_candidates
+### Legacy matching data
 
-Search/matching audit table.
+The workbook importer keeps resumable match and review state in `data/cache/import-auto-match-progress.json`. `douban_match_candidates` below is a historical design sketch, not a table created by the current PostgreSQL repository.
 
 ```text
 id uuid primary key
@@ -254,6 +254,7 @@ source_ref text
 source_label text
 active boolean
 created_at timestamptz
+updated_at timestamptz
 ```
 
 When a movie is recorded as watched from a recommendation card, its
@@ -279,12 +280,12 @@ restore candidate-pool rows only when the movie is otherwise eligible.
 Marking a movie as maybe-later should not deactivate candidate-pool rows in this
 frontend slice. It is a weak signal and may later feed recency/downrank logic.
 
-The record-watched request path must preserve the originating recommendation
-item when the user starts from a recommendation card. On success, it should
-write the viewing-history row, mark the `recommendation_items` row as
-watched/processed, and deactivate the related candidate-pool entry as one
-successful workflow. The `viewing_history` row should not carry recommendation
-processing status; that belongs to `recommendation_items`.
+The record-watched request carries the originating recommendation item when the
+user starts from a recommendation card. It saves `viewing_history` and its sync
+task first, then separately marks the recommendation item watched and
+deactivates the candidate-pool row. If this later step fails, the API returns
+the saved history with a warning. Recommendation processing status belongs to
+`recommendation_items`, not `viewing_history`.
 
 ### candidate_subject_queue
 
@@ -302,6 +303,8 @@ error text
 created_at timestamptz
 updated_at timestamptz
 ```
+
+`history_recommendation_discovery` tracks watched subjects already scanned for one-layer recommendations, so discovery can resume without repeating completed work.
 
 Initial discovery writes Top250 subjects with:
 
@@ -353,6 +356,8 @@ rank integer
 slot_type text
 score numeric
 score_components jsonb
+source_ref text
+source_label text
 processing_status text
 processed_at timestamptz
 created_at timestamptz
@@ -372,6 +377,7 @@ User feedback on recommendations.
 ```text
 id uuid primary key
 session_id uuid references recommendation_sessions(id)
+item_id uuid references recommendation_items(id)
 movie_id uuid references movies(id)
 feedback_type text
 feedback_value numeric
@@ -379,7 +385,7 @@ comment text
 created_at timestamptz
 ```
 
-Suggested feedback types:
+Current feedback types:
 
 ```text
 want_to_watch
@@ -388,12 +394,10 @@ not_interested
 opened_douban
 removed_from_wishlist
 clear_not_interested
-already_watched_correction
-match_error
 ```
 
-Feedback rows are append-only user-signal events. Later state changes should not
-mutate older feedback events. Removing a movie from wishlist should append a
+Feedback normally records user-signal events. Undoing a processed recommendation
+can delete its latest matching feedback event. Removing a movie from wishlist appends a
 `removed_from_wishlist` event that downgrades the current state to maybe-later
 semantics. Removing a movie from the not-interested view should append
 `clear_not_interested`. Recommendation filtering should derive current movie
@@ -601,26 +605,27 @@ diversity_gain =
 
 This diversity score is batch-local. It prevents a single recommendation session from returning eight very similar movies; it does not measure novelty against the user's full viewing history.
 
-### Planned Contextual Bandit Strategy
+### Contextual Bandit Strategy
 
-The planned first learning strategy is `bandit_hybrid`. It keeps the first four
-exploit slots on the existing hybrid ranker and uses Linear Thompson Sampling
-for the four explore slots.
+`bandit_hybrid` is implemented in `backend/app/recommenders/bandit.py` and
+`backend/app/services/recommendation_service.py`. It keeps the first four exploit
+slots on the hybrid ranker and uses diagonal Linear Thompson Sampling for the
+four explore slots after at least 20 trainable examples. With fewer examples or
+on a training error, it falls back to hybrid diversity exploration.
 
-The API and frontend defaults remain `hybrid`. `bandit_hybrid` should be
-invoked explicitly by strategy parameter for backend review and evaluation
-before any frontend default changes. Backend implementation should preserve the
-current hard exclusions, exposure cooldown, maybe-later downranking, and
-batch-level diversity constraints.
+The API and fresh frontend default remain `hybrid`. The frontend header now
+offers a strategy selector and persists the selection in local storage. Both
+strategies preserve hard exclusions, exposure cooldown, maybe-later
+downranking, and batch-level diversity.
 
 See `docs/contextual-bandit-design.md` for the detailed algorithm, feature
 versioning, reward mapping, persistence rules, and fallback behavior. See
 `docs/checklists/contextual-bandit-implementation-checklist.md` for the
-implementation checklist.
+completed backend implementation record.
 
 ### Feedback Weights
 
-Initial weights:
+Bandit training rewards (resolved from feedback and watched ratings, rather than the stored `feedback_value` numbers):
 
 ```text
 want_to_watch: +0.10
@@ -631,21 +636,26 @@ watched rating < 4.0: -1.00
 watched rating 4.0 to 5.0: rating - 4.0
 ```
 
-These are product defaults, not fixed model truth. They should be tuned after real use.
+The stored `feedback_value` field uses a separate immediate-feedback scale. The bandit rewards above are training-time interpretations and can be tuned after real use.
 See `docs/contextual-bandit-design.md` for bandit-specific reward resolution and training exclusions.
 
 ## Current FastAPI Endpoints
 
 ```text
 GET  /movies/search?q={query}
+GET  /candidate-queue/status
+POST /candidate-queue/process
 POST /viewing-history
 GET  /viewing-history?year={year}&limit={limit}&offset={offset}&order={asc|desc}
 PATCH /viewing-history/{history_id}
 DELETE /viewing-history/{history_id}
 POST /viewing-history/{history_id}/sync
+GET  /viewing-history-sync/status
 GET  /recommendations?strategy=hybrid
+GET  /recommendations?strategy=bandit_hybrid
 GET  /recommendations/{session_id}
 POST /recommendations/{session_id}/items/{item_id}/feedback
+DELETE /recommendations/{session_id}/items/{item_id}/processing
 
 GET  /wishlist
 POST /wishlist/{wishlist_id}/watched
@@ -655,7 +665,7 @@ GET  /not-interested
 DELETE /not-interested/{movie_id}
 ```
 
-Import, rebuild, enrichment, candidate-pool, and evaluation operations are CLI jobs under `jobs/`; they are not exposed as HTTP admin endpoints.
+Import, rebuild, bulk enrichment, and evaluation operations are CLI jobs under `jobs/`. The desktop candidate-queue control endpoints process queued subjects in the background.
 
 ## Frontend Views
 
@@ -664,6 +674,7 @@ Import, rebuild, enrichment, candidate-pool, and evaluation operations are CLI j
 Primary screen.
 
 - button to request eight recommendations
+- selector for `hybrid` or `bandit_hybrid`, with `hybrid` as the fresh-install default
 - eight movie cards
 - actions:
   - want-to-watch

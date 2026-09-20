@@ -1,12 +1,12 @@
 # Contextual Bandit Recommendation Design
 
-This document defines the first learning recommendation strategy for the movie recommender. It is not a true RL agent. It is an online ranking layer that uses accumulated recommendation feedback to improve the exploratory half of each recommendation session.
+This document records the implemented first learning recommendation strategy and its design rationale. It is an online ranking layer that uses accumulated recommendation feedback for the exploratory half of each recommendation session.
 
 ## Decision
 
 Use Linear Thompson Sampling for the first contextual bandit implementation.
 
-The first production shape should be `bandit_hybrid`:
+The implemented strategy is `bandit_hybrid`:
 
 ```text
 8 recommendation slots
@@ -16,7 +16,7 @@ The first production shape should be `bandit_hybrid`:
 
 The existing `hybrid` strategy remains the default baseline until the bandit has enough feedback history and evaluation evidence.
 
-Bandit v1 controls only the four explore slots. The four exploit slots continue to come from the existing hybrid ranker. The frontend default should not automatically switch to `bandit_hybrid`; switching defaults requires manual approval after evaluation and real-use evidence.
+Bandit v1 controls only the four explore slots. The four exploit slots continue to come from the existing hybrid ranker. The frontend offers an explicit strategy selector and stores the user's choice locally. A fresh client defaults to `hybrid`.
 
 The public strategy name is:
 
@@ -30,7 +30,7 @@ The API and frontend default remains:
 hybrid
 ```
 
-`bandit_hybrid` should be invoked explicitly through the recommendation strategy parameter during evaluation and review.
+`bandit_hybrid` can be selected in the frontend, passed as the API strategy parameter, or used by the evaluator.
 
 ## Why Not Full RL
 
@@ -72,7 +72,7 @@ Minimum context fields:
 - active candidate count
 - strategy and feature version
 
-`recommendation_sessions.context_snapshot` should store a compact, versioned summary of these fields.
+`recommendation_sessions.context_snapshot` currently stores feature and reward versions, training count, use/fallback status, and recommendation-run metadata. Profile aggregates are rebuilt when fitting and serving; persisting a compact profile summary remains a design option.
 
 ## Candidate Features
 
@@ -140,7 +140,7 @@ For each recommendation run:
 1. Build the normal hybrid ranking.
 2. Select the top 4 exploit items from hybrid ranking.
 3. Exclude already selected items from the explore candidate set.
-4. Fit or load the Linear Thompson Sampling posterior from historical feedback.
+4. Fit the Linear Thompson Sampling posterior from historical feedback.
 5. Sample candidate weights from the posterior.
 6. Score remaining candidates with the sampled weights.
 7. Select 4 explore items, preserving existing hard exclusions and batch-level diversity.
@@ -226,7 +226,7 @@ Examples:
 5.0 -> 1.00
 ```
 
-When a recommendation is later recorded as watched, the post-watch reward should supersede weaker pre-watch feedback for model training. The historical event log should remain append-only; reward resolution is a training-time interpretation.
+When a recommendation is later recorded as watched, the post-watch reward supersedes weaker pre-watch feedback for model training. Reward resolution is a training-time interpretation of stored events. The UI's undo action can remove the latest matching feedback event.
 
 Example:
 
@@ -372,7 +372,7 @@ Add this only if fitting on demand becomes too slow or if model replay/debugging
 
 ## Evaluation
 
-Extend `jobs.evaluate_recommendations` before switching the frontend default from `hybrid` to `bandit_hybrid`.
+`jobs.evaluate_recommendations` reports bandit use and fallback counts, explore-slot reward rate, repeated movies, and leakage. Switching the fresh frontend default from `hybrid` to `bandit_hybrid` remains a separate product decision.
 
 The bandit should not become eligible for exploit slots through an automatic threshold. It can be considered for broader control only after evaluation and real-use evidence support a manual product decision.
 
@@ -384,7 +384,7 @@ GET /recommendations?strategy=bandit_hybrid&seed=42
 
 If there are fewer than 20 trainable examples, `bandit_hybrid` should fall back to the current hybrid diversity explore logic for the explore slots.
 
-If bandit training or local snapshot handling fails, the recommendation request should fall back to the current hybrid diversity explore logic and persist the fallback in `context_snapshot`:
+If bandit training fails, the recommendation request falls back to hybrid diversity exploration and records the fallback in `context_snapshot`. A failure to write the optional local model cache is ignored and does not force fallback:
 
 ```json
 {
@@ -393,9 +393,9 @@ If bandit training or local snapshot handling fails, the recommendation request 
 }
 ```
 
-Implementation should start with backend strategy support and evaluator coverage. Do not change the frontend default entry point before backend behavior has been reviewed.
+Backend strategy support and evaluator coverage were completed before the frontend strategy selector was added. The fresh frontend default remains `hybrid`.
 
-Use `docs/checklists/contextual-bandit-implementation-checklist.md` to track backend implementation.
+The completed backend implementation record is `docs/checklists/contextual-bandit-implementation-checklist.md`.
 
 Minimum reports:
 
@@ -408,9 +408,7 @@ Minimum reports:
 - negative-feedback recurrence
 - comparison against deterministic `hybrid`
 
-## Open Questions For Grilling
+## Future Questions
 
-1. Should a missing rating after watched-from-recommendation be positive enough to train on?
-2. Should `want_to_watch` be allowed to outweigh a later low rating?
-3. Should bandit control only explore slots forever, or become eligible for exploit slots after enough evidence?
-4. Should exposure-only no-feedback items be ignored or used as weak negative examples after an age threshold?
+1. Should bandit control only explore slots forever, or become eligible for exploit slots after enough evidence?
+2. Should exposure-only no-feedback items be ignored or used as weak negative examples after an age threshold?

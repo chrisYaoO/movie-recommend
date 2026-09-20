@@ -1,6 +1,6 @@
 # Frontend Checklist
 
-This document is the execution record for completed frontend slices and the source of truth for remaining frontend and desktop performance targets. Use `README.md` for setup and routine operation.
+This document is a historical execution record for frontend work. Its earlier decisions to hide strategy controls and treat Google Sheets as the watched-history source of truth were superseded: the current UI offers a `hybrid`/`bandit_hybrid` selector, and PostgreSQL commits history before the Sheet-sync outbox flush. Use `README.md`, `CONTEXT.md`, and `docs/architecture.md` for current behavior.
 
 ## Purpose
 

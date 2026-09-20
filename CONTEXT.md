@@ -167,7 +167,9 @@ During movie-detail enrichment, the parser should also capture Douban "recommend
 
 Matched and enriched viewing history should be stored in PostgreSQL so the recommender, feedback loop, baseline evaluation, and frontend all read a consistent local database.
 
-PostgreSQL should store:
+The active PostgreSQL runtime stores canonical movies, viewing history, candidate pool and queue entries, recommendation sessions and items, feedback, wishlist state, and a Sheet-sync outbox. The older workbook matching flow also keeps progress and review data in JSON under `data/cache/`.
+
+The broader persistence model should support:
 
 - raw Excel rows
 - Douban match candidates and match decisions
@@ -180,7 +182,7 @@ PostgreSQL should store:
 - feedback events
 - wishlist state
 
-For the next database rebuild, `viewing_history` should be reconstructed from Google Sheets plus the existing auto-match progress JSON by matching sheet name and `source_row_number`. During the rebuild, all database tables except the two candidate tables, `candidate_subject_queue` and `candidate_pool`, may be cleared after explicit user approval. The `movies` table should then be reloaded from Douban subject detail pages referenced by viewing history, then expanded through candidate discovery. The `movies` schema should drop `display_title` and `original_title`; other metadata columns should remain unless the user approves a further schema change.
+The earlier database rebuild reconstructed `viewing_history` from Google Sheets plus auto-match progress by matching Sheet name and row number. That was a one-time migration plan, not the runtime identity rule. Runtime records now use stable UUIDs, and `source_sheet_name + source_row_number` is only a cached Sheet locator. The `movies` schema no longer persists `display_title` or `original_title`.
 
 When replaying the progress JSON, confirmed subject IDs should be selected by explicit priority: `manual_id_persisted` over `review_confirmed_persisted` over `auto_matched_persisted`. If the highest-priority confirmed entries for one source row disagree on subject ID, the row should be reported and skipped rather than guessed.
 
@@ -196,7 +198,7 @@ If `movies` already contains the watched subject, `movie_id` can be filled immed
 
 ### First-Version Strategy
 
-The first version should not depend on a true RL agent. It should implement strong baselines and a hybrid recommender first, while logging feedback in a way that can support later contextual bandit, learning-to-rank, or RL-style sequential policies.
+The first version does not depend on a true RL agent. It implements baseline rankers and a hybrid recommender, and logs feedback for the optional contextual bandit and possible later learning-to-rank or sequential policies.
 
 Initial strategies:
 
@@ -206,7 +208,7 @@ Initial strategies:
 
 The normal frontend should default to the hybrid strategy. The backend should allow strategy switching for evaluation and debugging.
 
-When the system adds a contextual bandit strategy, the preferred first algorithm is Linear Thompson Sampling. It should learn from accumulated recommendation feedback while keeping the hybrid ranker as the default baseline and fallback.
+The optional `bandit_hybrid` strategy uses diagonal Linear Thompson Sampling for the four explore slots. It learns from accumulated recommendation feedback after 20 trainable examples and uses hybrid exploration as a fallback. `hybrid` remains the API and fresh frontend default; users can choose either strategy in the UI.
 
 ### Hybrid Ranking Signals
 
@@ -228,8 +230,8 @@ Accepted stack:
 
 - backend API: Python FastAPI
 - database: PostgreSQL
-- data jobs: Python with pandas and Selenium or Playwright
-- recommendation libraries: Python ML ecosystem, starting with simple scikit-learn style methods
+- data jobs: Python with `openpyxl` and Selenium
+- recommendation code: Python baseline scoring and dependency-free diagonal Linear Thompson Sampling
 - frontend: React with TypeScript
 
 ## MVP Boundary
@@ -262,5 +264,5 @@ Accepted stack:
 ## Related Docs
 
 - `docs/requirements.md`: functional and non-functional requirements
-- `docs/architecture.md`: data flow, schema draft, modules, endpoints, and recommendation mechanics
+- `docs/architecture.md`: data flow, active schema, legacy sketches, modules, endpoints, and recommendation mechanics
 - `docs/agents/`: local agent workflow configuration
